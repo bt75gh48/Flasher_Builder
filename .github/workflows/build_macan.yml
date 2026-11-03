@@ -38,9 +38,13 @@ on:
         type: choice
         required: true
         options:
-          - DS_SFTP
+          - Gofile
           - Artifact Only
-        default: DS_SFTP
+        default: Gofile
+      gofile_api_key:
+        description: "Gofile API Key (optional, falls back to GOFILE_API_KEY secret)"
+        type: string
+        required: false
       notify_telegram:
         description: "Notify Telegram"
         type: boolean
@@ -407,151 +411,61 @@ jobs:
       # ===============================================================================
       # ===============================================================================
 
-      - name: Compute upload paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          device="${{ inputs.device }}"
-          ftype="${{ inputs.flasher_type }}"
-          region="${{ inputs.region }}"
-          dev_disp="${{ inputs.device }}"
-
-          # -----------------------------
-          # Base category & relative path
-          # -----------------------------
-          if [[ "$ftype" == "Super Flasher" && "$region" != "CN" && "$device" == "Oneplus Ace 6T" ]]; then
-            category="OxygenOS Flashers"
-            rel="$device/$category"
-          else
-            if [[ "$ftype" =~ ^(SuperHybrid\ Flasher|Super\ Flasher)$ ]]; then
-              category="Super Flashers"
-            else
-              category="Regional Flashers"
-            fi
-            rel="$device/$category"
-          fi
-
-          # -----------------------------
-          # Devices that do NOT get region subfolders
-          # -----------------------------
-          no_region_devices=(
-            "Oneplus Ace 6T"
-          )
-
-          needs_region=1
-          for n in "${no_region_devices[@]}"; do
-            [[ "$n" == "$device" ]] && needs_region=0
-          done
-
-          # -----------------------------
-          # Region subfolder (COS / Global / EU / IN / NA)
-          # -----------------------------
-          if [[ $needs_region -eq 1 ]]; then
-            case "$region" in
-              CN)  region_folder="COS" ;;
-              GLO) region_folder="Global" ;;
-              EU)  region_folder="EU" ;;
-              IN)  region_folder="IN" ;;
-              NA)  region_folder="NA" ;;
-              *)   region_folder="$region" ;;
-            esac
-            rel="$rel/$region_folder"
-          fi
-
-          # -----------------------------
-          # Normalize + export
-          # -----------------------------
-          rel="${rel//\\//}"
-          [[ "${rel: -1}" == "/" ]] || rel="${rel}/"
-          echo "REL_UPLOAD_DIR=$rel" >> "$GITHUB_ENV"
-          # The SFTP account starts directly in its /Files directory.
-          # Keep this path relative: adding "Files/" here would upload to /Files/Files/.
-          echo "SFTP_UPLOAD_DIR=$rel" >> "$GITHUB_ENV"
-          
-      # ===============================================================================
-      # ===============================================================================
-
-      - name: Upload to DS_SFTP
-        if: ${{ inputs.upload_to == 'DS_SFTP' }}
+      - name: Upload to Gofile
+        if: ${{ inputs.upload_to == 'Gofile' }}
         env:
-          DS_SFTP_HOST: ${{ secrets.DS_SFTP_HOST }}
-          DS_SFTP_USER: ${{ secrets.DS_SFTP_USER }}
-          DS_SFTP_PRIVATE_KEY: ${{ secrets.DS_SFTP_PRIVATE_KEY }}
-          DS_SFTP_KNOWN_HOSTS: ${{ secrets.DS_SFTP_KNOWN_HOSTS }}
+          GOFILE_API_KEY_INPUT: ${{ inputs.gofile_api_key }}
+          GOFILE_API_KEY_SECRET: ${{ secrets.GOFILE_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail
-          : "${DS_SFTP_HOST:?Missing DS_SFTP_HOST}"
-          : "${DS_SFTP_USER:?Missing DS_SFTP_USER}"
-          : "${DS_SFTP_PRIVATE_KEY:?Missing DS_SFTP_PRIVATE_KEY}"
-          : "${DS_SFTP_KNOWN_HOSTS:?Missing DS_SFTP_KNOWN_HOSTS}"
-          command -v sftp >/dev/null 2>&1 || { echo "sftp client not found"; exit 1; }
-          command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen not found"; exit 1; }
+          api_key="${GOFILE_API_KEY_INPUT:-${GOFILE_API_KEY_SECRET:-}}"
+          [ -n "$api_key" ] || { echo "Missing Gofile API key (provide gofile_api_key input or GOFILE_API_KEY secret)"; exit 1; }
+          echo "::add-mask::$api_key"
 
-          remote_dir="$(printf "%s" "$SFTP_UPLOAD_DIR" | sed 's#^/*##; s#/*$##')"
-          file_name="${ARTIFACT_NAME}.zip"
           zip_path="$ZIP_FILE"
           [ -f "$zip_path" ] || { echo "ZIP not found: $zip_path"; exit 1; }
 
-          if [[ -z "$remote_dir" || "$remote_dir" == /* || "$remote_dir" == *..* ]]; then
-            echo "Unsafe SFTP upload directory: $remote_dir"
-            exit 1
+          server="upload.gofile.io"
+          srv_json="$(curl -fsS --max-time 15 "https://api.gofile.io/servers" 2>/dev/null || true)"
+          if [ -n "$srv_json" ]; then
+            best_srv="$(python3 -c 'import sys,json
+          try:
+            d=json.loads(sys.stdin.read())
+            s=d.get("data",{}).get("servers",[])
+            if s and s[0].get("name"):
+              print(s[0]["name"] + ".gofile.io")
+          except Exception:
+            pass' <<< "$srv_json")"
+            [ -n "$best_srv" ] && server="$best_srv"
           fi
-          case "${remote_dir}${file_name}${zip_path}" in
-            *$'\n'*|*$'\r'*|*'"'*)
-              echo "Unsupported quote or newline in SFTP path"
-              exit 1
-              ;;
-          esac
 
-          ssh_tmp="$(mktemp -d "${RUNNER_TEMP}/ds-sftp.XXXXXX")"
-          trap 'rm -rf -- "$ssh_tmp"' EXIT
-          key_file="$ssh_tmp/id_ed25519"
-          known_hosts_file="$ssh_tmp/known_hosts"
-          batch_file="$ssh_tmp/upload.batch"
+          echo "Uploading $(basename "$zip_path") to Gofile via https://${server}/uploadfile ..."
+          resp_file="$RUNNER_TEMP/gofile_resp.json"
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -H "Authorization: Bearer ${api_key}" \
+            -F "file=@${zip_path}" \
+            "https://${server}/uploadfile" -o "$resp_file"
 
-          printf '%s\n' "$DS_SFTP_PRIVATE_KEY" > "$key_file"
-          printf '%s\n' "$DS_SFTP_KNOWN_HOSTS" > "$known_hosts_file"
-          chmod 600 "$key_file" "$known_hosts_file"
-          ssh-keygen -y -f "$key_file" >/dev/null
-          ssh-keygen -lf "$known_hosts_file" -E sha256 \
-            | awk '{print $2}' \
-            | grep -Fx 'SHA256:/iJcgY2EReHPrZbmvttIBRyk3UxqCH4RQr6byGj1dPU' >/dev/null \
-            || { echo "Unexpected SFTP host key"; exit 1; }
+          download_page="$(python3 -c 'import sys,json
+          d=json.load(open(sys.argv[1], encoding="utf-8"))
+          if d.get("status") != "ok":
+            sys.exit("Gofile upload error: " + str(d))
+          url=d.get("data",{}).get("downloadPage","")
+          if not url:
+            sys.exit("No downloadPage in Gofile response: " + str(d))
+          print(url)' "$resp_file")"
 
-          current=""
-          IFS='/' read -r -a path_parts <<< "$remote_dir"
-          for part in "${path_parts[@]}"; do
-            [[ -n "$part" ]] || continue
-            current="${current:+$current/}$part"
-            printf -- '-mkdir "%s"\n' "$current" >> "$batch_file"
-          done
+          echo "Gofile Download URL: $download_page"
+          echo "GOFILE_DOWNLOAD_URL=$download_page" >> "$GITHUB_ENV"
 
-          remote_file="${remote_dir}/${file_name}"
-          remote_part="${remote_file}.filepart"
-          {
-            printf -- '-rm "%s"\n' "$remote_part"
-            printf 'put "%s" "%s"\n' "$zip_path" "$remote_part"
-            printf 'chmod 0664 "%s"\n' "$remote_part"
-            printf 'rename "%s" "%s"\n' "$remote_part" "$remote_file"
-          } >> "$batch_file"
-
-          echo "Uploading via SFTP to /Files/${remote_file}"
-          sftp -q -P 2022 \
-            -i "$key_file" \
-            -o BatchMode=yes \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o "UserKnownHostsFile=$known_hosts_file" \
-            -b "$batch_file" \
-            "${DS_SFTP_USER}@${DS_SFTP_HOST}"
-               
       # ===============================================================================
       # ===============================================================================
-
 
       - name: Telegram notify
-        if: ${{ inputs.upload_to == 'DS_SFTP' }}
+        if: ${{ inputs.upload_to == 'Gofile' }}
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '1593626807' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -563,88 +477,25 @@ jobs:
           type="$FTYPE"
           version="${OTA_VERSION:-UNKNOWN}"
           artifact="$ARTIFACT_NAME"
-          sftp_rel_dir="$SFTP_UPLOAD_DIR"
+          zip_link="$GOFILE_DOWNLOAD_URL"
 
           # -----------------------------
-          # Device -> Chat ID mapping
+          # Telegram Chat ID
           # -----------------------------
-          chat_id=""
-          chat_name=""
-          case "$device_disp" in
-            "Oneplus 15R"|"Oneplus Ace 6T")
-              chat_id="-1001903485514"
-              chat_name="Oneplus 15 Group"
-              ;;
-            *)
-              echo "ℹ️ Telegram: No group mapping for device '$device_disp' -> skipping notify."
-              exit 0
-              ;;
-          esac
-
-          # -----------------------------
-          # Build links (same logic as before)
-          # -----------------------------
-          raw_path="Files/${sftp_rel_dir}${artifact}.zip"
-          enc_raw="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$raw_path")"
-          enc_raw="${enc_raw//%20/+}"
-          zip_link="https://roms.danielspringer.at/download.php?file=${enc_raw}&download=true"
-
-          zip_dir="$sftp_rel_dir"
-          zip_dir="${zip_dir#Files/}"
-          zip_dir="${zip_dir#/}"
-          zip_plain="${zip_dir}${artifact}.zip"
-
-          zip_param="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$zip_plain")"
-          zip_param="${zip_param//%20/+}"
-
-          if [[ "$region" == "CN" ]]; then
-            img_folder="COS_FILES_HERE"
-          else
-            img_folder="OOS_FILES_HERE"
-          fi
-
-          boot_param="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "${img_folder}/boot.img")"
-          boot_param="${boot_param//%20/+}"
-          init_boot_param="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "${img_folder}/init_boot.img")"
-          init_boot_param="${init_boot_param//%20/+}"
-
-          boot_link="https://roms.danielspringer.at/index.php?action=download_from_zip&zip=${zip_param}&file=${boot_param}"
-          init_boot_link="https://roms.danielspringer.at/index.php?action=download_from_zip&zip=${zip_param}&file=${init_boot_param}"
-
-          # Resolve an exact changelog for this uploaded ZIP. The resolver
-          # returns 302 only when the package exists and its device, region
-          # and version map to one unambiguous changelog.
-          changelog_link=""
-          changelog_status="$(
-            curl -sS --head --max-time 15 -o /dev/null -w '%{http_code}' \
-              --get "https://roms.danielspringer.at/index.php" \
-              --data-urlencode "view=changelog" \
-              --data-urlencode "package=${zip_plain}" \
-            || true
-          )"
-          if [[ "$changelog_status" == "302" ]]; then
-            changelog_param="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$zip_plain")"
-            changelog_link="https://roms.danielspringer.at/index.php?view=changelog&package=${changelog_param}#changelog-view"
-          fi
+          chat_id="${TELEGRAM_CHAT_ID:-1593626807}"
+          chat_name="Telegram (${chat_id})"
 
           # -----------------------------
           # Always log what would happen
           # -----------------------------
           echo "================ Telegram notify (dry info) ================"
           echo "Device:   $device_disp"
-          echo "Region:   $region  -> img_folder=$img_folder"
+          echo "Region:   $region"
           echo "Type:     $type"
           echo "Version:  $version"
           echo "Artifact: $artifact"
           echo "Target:   $chat_name ($chat_id)"
-          echo "ZIP:      $zip_link"
-          echo "boot.img: $boot_link"
-          echo "init_boot.img: $init_boot_link"
-          if [[ -n "$changelog_link" ]]; then
-            echo "Changelog: available ($changelog_status)"
-          else
-            echo "Changelog: unavailable ($changelog_status) -> button omitted"
-          fi
+          echo "Gofile:   $zip_link"
           echo "notify_telegram input: ${{ inputs.notify_telegram }}"
           echo "============================================================"
 
@@ -657,8 +508,8 @@ jobs:
           fi
 
           payload_path="$RUNNER_TEMP/tg_payload.json"
-          CHAT_ID="$chat_id" DEVICE="$device_disp" REGION="$region" TYPE="$type" VERSION="$version" ARTIFACT="$artifact" ZIP="$zip_link" BOOT="$boot_link" INIT="$init_boot_link" CHANGELOG="$changelog_link" OUT="$payload_path" \
-          python3 -c 'import os,json,html; chat_id=int(os.environ["CHAT_ID"]); device=html.escape(os.environ["DEVICE"]); region=html.escape(os.environ["REGION"]); typ=html.escape(os.environ["TYPE"]); version=html.escape(os.environ["VERSION"]); artifact=html.escape(os.environ["ARTIFACT"]); zip_url=os.environ["ZIP"]; boot_url=os.environ["BOOT"]; init_boot_url=os.environ["INIT"]; changelog_url=os.environ["CHANGELOG"]; text="🚀 <b>New Build Released</b>\n"+f"📱 <b>Device</b>  <code>{device}</code>\n"+f"🌍 <b>Region</b>  <code>{region}</code>\n"+f"🧩 <b>Type</b>    <code>{typ}</code>\n"+f"🏷️ <b>Version</b> <code>{version}</code>\n\n"+"📦 <b>Package</b>\n"+f"<code>{artifact}</code>\n\n"+"⬇️ Choose a download below."; package_row=[{"text":"⬇️ Full ZIP","url":zip_url}]; package_row.extend([{"text":"📋 Changelog","url":changelog_url}] if changelog_url else []); keyboard=[package_row,[{"text":"🧱 boot.img","url":boot_url},{"text":"🧱 init_boot.img","url":init_boot_url}]]; p={"chat_id":chat_id,"text":text,"parse_mode":"HTML","disable_web_page_preview":True,"reply_markup":{"inline_keyboard":keyboard}}; open(os.environ["OUT"],"w",encoding="utf-8").write(json.dumps(p, ensure_ascii=False,separators=(",",":")))'
+          CHAT_ID="$chat_id" DEVICE="$device_disp" REGION="$region" TYPE="$type" VERSION="$version" ARTIFACT="$artifact" ZIP="$zip_link" OUT="$payload_path" \
+          python3 -c 'import os,json,html; chat_id=int(os.environ["CHAT_ID"]); device=html.escape(os.environ["DEVICE"]); region=html.escape(os.environ["REGION"]); typ=html.escape(os.environ["TYPE"]); version=html.escape(os.environ["VERSION"]); artifact=html.escape(os.environ["ARTIFACT"]); zip_url=os.environ["ZIP"]; text="🚀 <b>New Build Released</b>\n"+f"📱 <b>Device</b>  <code>{device}</code>\n"+f"🌍 <b>Region</b>  <code>{region}</code>\n"+f"🧩 <b>Type</b>    <code>{typ}</code>\n"+f"🏷️ <b>Version</b> <code>{version}</code>\n\n"+"📦 <b>Package</b>\n"+f"<code>{artifact}</code>\n\n"+"⬇️ Choose a download below."; keyboard=[[{"text":"⬇️ Download (Gofile)","url":zip_url}]]; p={"chat_id":chat_id,"text":text,"parse_mode":"HTML","disable_web_page_preview":True,"reply_markup":{"inline_keyboard":keyboard}}; open(os.environ["OUT"],"w",encoding="utf-8").write(json.dumps(p, ensure_ascii=False,separators=(",",":")))'
 
           test -s "$payload_path" || { echo "Telegram payload not created"; exit 1; }
 
