@@ -29,8 +29,13 @@ on:
           - IN
           - CN
         default: GLO
+      ota_version:
+        description: "Catalog OTA Version (e.g. 'latest', '16.0.10.500', or full version; used if ota_url is empty)"
+        type: string
+        required: false
+        default: "latest"
       ota_url:
-        description: "FULL OTA.zip URL (leave empty for placeholder)"
+        description: "Direct FULL OTA.zip URL (optional, overrides Catalog OTA Version)"
         type: string
         required: false
       upload_to:
@@ -85,89 +90,88 @@ jobs:
       # ===============================================================================
       # ===============================================================================
 
-      - name: Prep dirs and placeholder
+      - name: Prepare, Download & Validate OTA
+        env:
+          INPUT_DEVICE: ${{ inputs.device }}
+          INPUT_FLASHER: ${{ inputs.flasher_type }}
+          INPUT_REGION: ${{ inputs.region }}
+          INPUT_OTA_URL: ${{ inputs.ota_url }}
+          INPUT_OTA_VER: ${{ inputs.ota_version }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p download "${OUT_DIR}"
 
-          # URL säubern: trim, Quotes weg, \u0026 -> &
-          raw="${{ inputs.ota_url }}"
-          url="$(printf '%s' "$raw" \
-            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                  -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" \
-                  -e 's/\\u0026/\&/g')"
+          python3 -c '
+          import os, re, shutil, sys
+          from argparse import Namespace
+          from pathlib import Path
+          from flasher_builder import backend, ota_catalog
 
-          echo "SANITIZED_URL=$url" >> "$GITHUB_ENV"
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          device = os.environ["INPUT_DEVICE"]
+          kind = os.environ["INPUT_FLASHER"]
+          region = os.environ["INPUT_REGION"]
+          raw_url = backend.clean_source(os.environ.get("INPUT_OTA_URL", ""))
+          ver_query = os.environ.get("INPUT_OTA_VER", "").strip()
 
-          if [ -z "$url" ]; then
-            echo "Placeholder OTA for dry-run" > download/PLACEHOLDER.txt
-            rm -f download/OTA.zip
-            (cd download && zip -q OTA.zip PLACEHOLDER.txt)
-          fi
-          
-      # ===============================================================================
-      # ===============================================================================
+          download_dir = repo / "download"
+          download_dir.mkdir(parents=True, exist_ok=True)
+          ota_dest = download_dir / "OTA.zip"
+          worker = backend.Worker()
 
-      - name: Download OTA zip
-        if: ${{ inputs.ota_url != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p download
-          url="${{ inputs.ota_url }}"
-          ftype="${{ inputs.flasher_type }}"
+          catalog_id = ""
+          if not raw_url:
+              if not ver_query:
+                  ver_query = "latest"
+              target_dev, target_reg = ota_catalog.targets(device, kind, region)["ota"]
+              data = ota_catalog.load_catalog(repo / ".ota-catalog", na=ota_catalog.uses_na_api(target_dev, target_reg))
+              releases = ota_catalog.releases_for(data, target_dev, target_reg)
+              if not releases:
+                  sys.exit(f"No OTA releases found in catalog for {target_dev} ({target_reg})")
+              if ver_query.lower() == "latest":
+                  chosen = releases[0]
+              else:
+                  matches = [
+                      r for r in releases
+                      if ver_query.lower() in (r["id"].lower(), r["version"].lower(), str(r.get("ota_version", "")).lower())
+                      or ver_query in re.findall(r"\d+(?:\.\d+){1,4}", r["version"])
+                  ]
+                  if not matches:
+                      avail = ", ".join(r["version"] for r in releases[:10])
+                      sys.exit(f"Could not find catalog version matching {ver_query!r}. Available: {avail}")
+                  chosen = matches[0]
+              catalog_id = chosen["id"]
+              c_dev, c_reg, c_ver, c_patch = chosen["device"], chosen["region"], chosen["version"], chosen.get("security_patch")
+              print(f"Resolved catalog release: {c_dev} / {c_reg} / {c_ver} (patch: {c_patch})")
 
-          # Download: Datei MUSS OTA.zip heißen (immer)
-          if command -v aria2c >/dev/null 2>&1; then
-            aria2c -x 12 -s 12 -c --file-allocation=none --retry-wait=5 --max-tries=10 --timeout=30 \
-              --summary-interval=10 --console-log-level=notice  \
-              --header="User-Agent: Dalvik/2.1.0 (Linux; U; Android 16; CPH2653 Build/AP3A.240617.008)" \
-              --header="userId: oplus-ota|15002017" \
-              --header="language: en-US" \
-              --header="brand: oneplus-exp" \
-              -o "download/OTA.zip" "$url"
-          else
-            curl -L --fail --retry 5 --retry-delay 5 \
-              -H "User-Agent: Dalvik/2.1.0 (Linux; U; Android 16; CPH2653 Build/AP3A.240617.008)" \
-              -H "userId: oplus-ota|15002017" \
-              -H "language: en-US" \
-              -H "brand: oneplus-exp" \
-              -o "download/OTA.zip" "$url"
-          fi
+          args = Namespace(
+              repo=str(repo),
+              device=device,
+              kind=kind,
+              region=region,
+              ota=raw_url,
+              ota_catalog_id=catalog_id,
+              download_ota=True,
+          )
 
-      # ===============================================================================
-      # ===============================================================================
+          # Fail-fast before downloading the 6+ GB OTA if Ace 6T CN donor ODM does not exist for this patch
+          if ota_catalog.needs_matched_odm(device, kind, region):
+              backend.plan_matched_odm(worker, args)
 
-      - name: Export OTA env
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "download/OTA.zip" || { echo "OTA.zip not found in download/"; exit 1; }
-          ota="$(realpath download/OTA.zip)"
-          ota_dir="$(dirname "$ota")"
-          {
-            echo "OTA_PATH=$ota"
-            echo "OTA_DIR=$ota_dir"
-          } >> "$GITHUB_ENV"
-          
-      # ===============================================================================
-      # ===============================================================================
+          version, payload_size, metadata = backend.prepare_ota(worker, args, "ota", ota_dest)
+          free = shutil.disk_usage(download_dir).free
+          required = max(2 * backend.GIB, payload_size * 3)
+          print(f"Verified FULL OTA version: {version} • payload: {payload_size / backend.GIB:.2f} GiB • free space: {free / backend.GIB:.1f} GiB")
+          if free < required:
+              sys.exit(f"Not enough disk space: {free / backend.GIB:.1f} GiB free, need at least {required / backend.GIB:.1f} GiB")
 
-      - name: Extract OTA version (from META-INF/com/android/metadata)
-        shell: bash
-        run: |
-          set -euo pipefail
-          content="$(unzip -p "$OTA_PATH" META-INF/com/android/metadata 2>/dev/null || true)"
-          [ -n "$content" ] || { echo "metadata not found in OTA.zip"; exit 1; }
-          version_line="$(printf "%s" "$content" | grep -E '^version_name=')" || { echo "version_name not found in metadata"; exit 1; }
-          val="${version_line#version_name=}"
-          numeric="$(printf "%s" "$val" | grep -oE '[0-9]+(\.[0-9]+){1,4}' | awk '{ print length, $0 }' | sort -nr | head -n1 | cut -d" " -f2-)"
-          [ -n "$numeric" ] || { echo "Could not parse numeric version from '$val'"; exit 1; }
-          echo "version_name=$val"
-          echo "$(printf "%s" "$content" | grep -E '^ota_version=')"
-          echo "Parsed OTA version: $numeric"
-          echo "OTA_VERSION=$numeric" >> "$GITHUB_ENV"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"OTA_PATH={ota_dest}\n")
+              env_file.write(f"OTA_DIR={download_dir}\n")
+              env_file.write(f"OTA_VERSION={version}\n")
+              env_file.write(f"OTA_CATALOG_ID={catalog_id}\n")
+          '
           
       # ===============================================================================
       # ===============================================================================
@@ -264,10 +268,40 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BLOAT_CACHE_DIR: ${{ runner.temp }}/flasher-bloat-cache
+          BLOAT_STATIC_ODM: "0"
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/stage_files.sh
+
+      - name: Stream patch-matched ColorOS ODM (Ace 6T OOS)
+        if: ${{ inputs.device == 'Oneplus Ace 6T' && inputs.flasher_type == 'Super Flasher' && (inputs.region == 'IN' || inputs.region == 'GLO') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import os, shutil, sys
+          from argparse import Namespace
+          from pathlib import Path
+          from flasher_builder import backend
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          ota_path = Path(os.environ["OTA_PATH"]).resolve()
+          ota_dir = Path(os.environ["OTA_DIR"]).resolve()
+          work_dir = Path(os.environ["WORK_DIR"]).resolve()
+          region = os.environ["REGION"]
+
+          worker = backend.Worker()
+          args = Namespace(repo=str(repo), device="Oneplus Ace 6T", kind="Super Flasher", region=region, ota_catalog_id=os.environ.get("OTA_CATALOG_ID", ""))
+          plan = backend.plan_matched_odm(worker, args)
+          _, _, metadata = backend.validate_ota(ota_path)
+          odm, receipt = backend.prepare_matched_odm(worker, args, metadata, ota_dir, plan)
+          dest = work_dir / "Super" / "odm.img"
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(odm, dest)
+          shutil.rmtree(ota_dir / "matched-odm", ignore_errors=True)
+          print("Staged matched ODM:", receipt)
+          '
           
       # ===============================================================================
       # ===============================================================================
@@ -319,6 +353,21 @@ jobs:
             echo
             echo "Folders in OTA_DIR:"
             ls -la "$ota_dir" || true
+            exit 1
+          fi
+
+          # Verify output images (matching Python backend checks)
+          if [[ "$REGION" == "CN" ]]; then
+            boot_dir="$result_dir/COS_FILES_HERE"
+          else
+            boot_dir="$result_dir/OOS_FILES_HERE"
+          fi
+          if [ ! -f "$boot_dir/boot.img" ]; then
+            echo "ERROR: Build output has no boot.img at $boot_dir/boot.img. The OTA may be incomplete or incompatible."
+            exit 1
+          fi
+          if [[ "$FTYPE" == *Super* ]] && [ ! -f "$result_dir/super.img" ]; then
+            echo "ERROR: Build output has no super.img at $result_dir/super.img."
             exit 1
           fi
 
@@ -392,9 +441,14 @@ jobs:
 
           [ -f "$zip_path" ] || { echo "Packaging failed: ZIP not created at $zip_path"; exit 1; }
 
+          sha256="$(sha256sum "$zip_path" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256" "$(basename "$zip_path")" > "${zip_path}.sha256"
+          echo "Package SHA-256: $sha256"
+
           {
             echo "ARTIFACT_NAME=$artifact_base"
             echo "ZIP_FILE=$zip_path"
+            echo "ZIP_SHA256=$sha256"
           } >> "$GITHUB_ENV"
           
       # ===============================================================================
