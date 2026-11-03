@@ -1,0 +1,681 @@
+name: Build Tool-Macan (Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Device"
+        type: choice
+        required: true
+        options:
+          - Oneplus 15R
+          - Oneplus Ace 6T
+        default: Oneplus 15R
+      flasher_type:
+        description: "Flasher type"
+        type: choice
+        required: true
+        options:
+          - Super Flasher
+          - Regional Flasher
+        default: Super Flasher
+      region:
+        description: "Region"
+        type: choice
+        required: true
+        options:
+          - GLO
+          - EU
+          - IN
+          - CN
+        default: GLO
+      ota_url:
+        description: "FULL OTA.zip URL (leave empty for placeholder)"
+        type: string
+        required: false
+      upload_to:
+        description: "Upload To"
+        type: choice
+        required: true
+        options:
+          - DS_SFTP
+          - Artifact Only
+        default: DS_SFTP
+      notify_telegram:
+        description: "Notify Telegram"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  OUT_DIR: out
+  ARTIFACT_RETENTION_DAYS: 14
+
+jobs:
+  build:
+    name: Build • ${{ inputs.device }} • ${{ inputs.flasher_type }} • ${{ inputs.region }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          # CRLF -> LF
+          git ls-files '*.sh' | while read -r f; do sed -i 's/\r$//' "$f"; done
+
+          # Make executable
+          find build_scripts   -type f -name "*.sh" -exec chmod +x {} +
+          find flasher_scripts -type f -name "*.sh" -exec chmod +x {} +
+
+          # Binaries (if present)
+          [ -f lpmake/lpmake ] && chmod +x lpmake/lpmake || true
+          [ -f otaripper/otaripper ] && chmod +x otaripper/otaripper || true
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Prep dirs and placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p download "${OUT_DIR}"
+
+          # URL säubern: trim, Quotes weg, \u0026 -> &
+          raw="${{ inputs.ota_url }}"
+          url="$(printf '%s' "$raw" \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" \
+                  -e 's/\\u0026/\&/g')"
+
+          echo "SANITIZED_URL=$url" >> "$GITHUB_ENV"
+
+          if [ -z "$url" ]; then
+            echo "Placeholder OTA for dry-run" > download/PLACEHOLDER.txt
+            rm -f download/OTA.zip
+            (cd download && zip -q OTA.zip PLACEHOLDER.txt)
+          fi
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Download OTA zip
+        if: ${{ inputs.ota_url != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p download
+          url="${{ inputs.ota_url }}"
+          ftype="${{ inputs.flasher_type }}"
+
+          # Download: Datei MUSS OTA.zip heißen (immer)
+          if command -v aria2c >/dev/null 2>&1; then
+            aria2c -x 12 -s 12 -c --file-allocation=none --retry-wait=5 --max-tries=10 --timeout=30 \
+              --summary-interval=10 --console-log-level=notice  \
+              --header="User-Agent: Dalvik/2.1.0 (Linux; U; Android 16; CPH2653 Build/AP3A.240617.008)" \
+              --header="userId: oplus-ota|15002017" \
+              --header="language: en-US" \
+              --header="brand: oneplus-exp" \
+              -o "download/OTA.zip" "$url"
+          else
+            curl -L --fail --retry 5 --retry-delay 5 \
+              -H "User-Agent: Dalvik/2.1.0 (Linux; U; Android 16; CPH2653 Build/AP3A.240617.008)" \
+              -H "userId: oplus-ota|15002017" \
+              -H "language: en-US" \
+              -H "brand: oneplus-exp" \
+              -o "download/OTA.zip" "$url"
+          fi
+
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Export OTA env
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "download/OTA.zip" || { echo "OTA.zip not found in download/"; exit 1; }
+          ota="$(realpath download/OTA.zip)"
+          ota_dir="$(dirname "$ota")"
+          {
+            echo "OTA_PATH=$ota"
+            echo "OTA_DIR=$ota_dir"
+          } >> "$GITHUB_ENV"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Extract OTA version (from META-INF/com/android/metadata)
+        shell: bash
+        run: |
+          set -euo pipefail
+          content="$(unzip -p "$OTA_PATH" META-INF/com/android/metadata 2>/dev/null || true)"
+          [ -n "$content" ] || { echo "metadata not found in OTA.zip"; exit 1; }
+          version_line="$(printf "%s" "$content" | grep -E '^version_name=')" || { echo "version_name not found in metadata"; exit 1; }
+          val="${version_line#version_name=}"
+          numeric="$(printf "%s" "$val" | grep -oE '[0-9]+(\.[0-9]+){1,4}' | awk '{ print length, $0 }' | sort -nr | head -n1 | cut -d" " -f2-)"
+          [ -n "$numeric" ] || { echo "Could not parse numeric version from '$val'"; exit 1; }
+          echo "version_name=$val"
+          echo "$(printf "%s" "$content" | grep -E '^ota_version=')"
+          echo "Parsed OTA version: $numeric"
+          echo "OTA_VERSION=$numeric" >> "$GITHUB_ENV"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Map device → pick builder (LIST ONLY)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dev_disp="${{ inputs.device }}"
+          ftype="${{ inputs.flasher_type }}"
+          region="${{ inputs.region }}"
+
+          # ----------------------------
+          # Device display → internal ID
+          # ----------------------------
+          declare -A DEV_MAP=(
+            ["Oneplus 15R"]="15R"
+            ["Oneplus Ace 6T"]="Ace6T"
+          )
+          
+          dev="${DEV_MAP[$dev_disp]}"
+          [[ -z "$dev" ]] && { echo "Unknown device: $dev_disp"; exit 1; }
+          
+          # ----------------------------
+          # Super Size:  CN  ||  NON-CN
+          # ----------------------------
+          if [[ "$ftype" == "Super Flasher" || "$ftype" == "SuperHybrid Flasher" ]]; then
+            declare -A SUPER_SIZE_TABLE=(
+              ["Ace6T"]="16886267904 16886267904"
+              ["15R"]="16231956480 16231956480"
+            )
+
+            entry="${SUPER_SIZE_TABLE[$dev]}"
+            [[ -z "$entry" ]] && {
+              echo "ERROR: SUPER_SIZE not defined for device=$dev"
+              exit 1
+            }
+
+            read -r CN_SIZE NON_CN_SIZE <<< "$entry"
+
+            if [[ "$region" == "CN" ]]; then
+              SUPER_SIZE="$CN_SIZE"
+            else
+              SUPER_SIZE="$NON_CN_SIZE"
+            fi
+
+            echo "SUPER_SIZE=$SUPER_SIZE" >> "$GITHUB_ENV"
+            
+            echo "Using SUPER_SIZE: $SUPER_SIZE"
+          fi
+
+          # ------------------------------------------------
+          # LIST-ONLY BUILDER TABLE (NO WILDCARDS)
+          # Key format: Flasher|Device|Region
+          # ------------------------------------------------
+          declare -A BUILDER_MAP
+
+          # ===== Super Flasher =====
+          BUILDER_MAP["Super Flasher|15R|EU"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|15R|GLO"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|15R|IN"]="BUILD_SUPER"
+          
+          BUILDER_MAP["Super Flasher|Ace6T|CN"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|Ace6T|IN"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|Ace6T|GLO"]="BUILD_SUPER"
+
+          # ===== Regional Flasher =====
+          BUILDER_MAP["Regional Flasher|15R|IN"]="BUILD_REGIONAL"
+          BUILDER_MAP["Regional Flasher|15R|GLO"]="BUILD_REGIONAL"
+          BUILDER_MAP["Regional Flasher|15R|EU"]="BUILD_REGIONAL"
+
+          # ------------------------------------------------
+          key="$ftype|$dev|$region"
+          base_name="${BUILDER_MAP[$key]}"
+
+          if [[ -z "$base_name" ]]; then
+            echo "❌ Unsupported combination:"
+            echo "   Device:  $dev_disp"
+            echo "   Flasher: $ftype"
+            echo "   Region:  $region"
+            exit 1
+          fi
+
+          echo "DEV=$dev" >> "$GITHUB_ENV"
+          echo "FTYPE=$ftype" >> "$GITHUB_ENV"
+          echo "REGION=$region" >> "$GITHUB_ENV"
+          echo "BUILDER_SH=${base_name}.sh" >> "$GITHUB_ENV"
+
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Stage files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BLOAT_CACHE_DIR: ${{ runner.temp }}/flasher-bloat-cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/stage_files.sh
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Pre-stage flasher into OTA folder
+        if: ${{ inputs.flasher_type == 'RegionalHybrid Flasher' || inputs.flasher_type == 'SuperHybrid Flasher' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$WORK_DIR"
+          [ -d "$src" ] || { echo "WORK_DIR not found: $src"; exit 1; }
+          dst="$OTA_DIR/$(basename "$src")"
+          mkdir -p "$dst"
+          rsync -a --info=progress2 "$src/" "$dst/"
+          [ -f "$OUT_DIR/otaripper" ] && cp -f "$OUT_DIR/otaripper" "$OTA_DIR/"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Run builder
+        shell: bash
+        working-directory: ${{ env.OTA_DIR }}
+        run: |
+          set -euo pipefail
+          echo "CWD is $(pwd)"
+          echo "Calling builder: \"$GITHUB_WORKSPACE/$OUT_DIR/$BUILDER_SH\" \"$OTA_PATH\""
+          bash "$GITHUB_WORKSPACE/$OUT_DIR/$BUILDER_SH" "$OTA_PATH"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Package final output
+        shell: bash
+        run: |
+          set -euo pipefail
+          ota_dir="$OTA_DIR"
+          dev_disp="${{ inputs.device }}"
+
+          expected_name="$FTYPE"
+          [[ "$REGION" == "CN" ]] && expected_name="$FTYPE CN"
+
+          echo "Expected output folder: $expected_name"
+
+          result_dir="$ota_dir/$expected_name"
+
+          if [ ! -d "$result_dir" ]; then
+            echo "ERROR: Expected output folder not found:"
+            echo "  $result_dir"
+            echo
+            echo "Folders in OTA_DIR:"
+            ls -la "$ota_dir" || true
+            exit 1
+          fi
+
+          zip_root="$GITHUB_WORKSPACE/$OUT_DIR"
+          mkdir -p "$zip_root"
+
+          ftype_name="$FTYPE"
+          region_code="$REGION"
+          ver="${OTA_VERSION:-UNKNOWN}"
+
+            case "$region_code" in
+              CN)  region_disp="COS" ;;
+              GLO) region_disp="GLO" ;;
+              EU)  region_disp="EU" ;;
+              IN)  region_disp="IN" ;;
+              NA)  region_disp="NA" ;;
+              *)   region_disp="$region_code" ;;
+            esac
+            
+            case "$dev_disp" in
+              "Oneplus 15R")    device_model="15R" ;;
+              "Oneplus Ace 6T") device_model="A6T" ;;
+              *)   device_model="$dev_disp" ;;
+            esac
+
+            case "$DEV" in
+              "Ace6T")
+                if [[ "$REGION" == "CN" ]]; then
+                  os_tag="COS"
+                else
+                  os_tag="${region_disp} OOS+COS ODM"
+                fi
+                artifact_base="${ftype_name} A6T ${os_tag} ${ver}"
+                ;;
+              *)
+                artifact_base="${ftype_name} ${device_model} ${region_disp} ${ver}"
+                ;;
+            esac
+
+          zip_path="$zip_root/${artifact_base}.zip"
+          rm -f "$zip_path"
+
+          echo "================ Packaging info ================"
+          echo "Source folder : $result_dir"
+          echo "Artifact name : $artifact_base"
+          echo "ZIP output    : $zip_path"
+          echo "================================================"
+
+          cd "$result_dir"
+          
+          echo "================ Folder tree (max depth 8) ================"
+          tree -L 8 -h . || echo "tree not available"
+          echo "Total size:"
+          du -sh .
+          echo "==========================================================="
+          
+
+          if command -v 7zz >/dev/null 2>&1; then
+            seven=7zz
+          elif command -v 7z >/dev/null 2>&1; then
+            seven=7z
+          else
+            seven=""
+          fi
+
+          if [ -n "$seven" ]; then
+            "$seven" a -tzip -mm=Deflate -mx=3 -mfb=32 -mmt=8 -bso0 -bsp0 "$zip_path" .
+          else
+            zip -qr -3 "$zip_path" .
+          fi
+
+          [ -f "$zip_path" ] || { echo "Packaging failed: ZIP not created at $zip_path"; exit 1; }
+
+          {
+            echo "ARTIFACT_NAME=$artifact_base"
+            echo "ZIP_FILE=$zip_path"
+          } >> "$GITHUB_ENV"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Upload artifact
+        if: ${{ inputs.upload_to == 'Artifact Only' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ZIP_FILE }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Compute upload paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          device="${{ inputs.device }}"
+          ftype="${{ inputs.flasher_type }}"
+          region="${{ inputs.region }}"
+          dev_disp="${{ inputs.device }}"
+
+          # -----------------------------
+          # Base category & relative path
+          # -----------------------------
+          if [[ "$ftype" == "Super Flasher" && "$region" != "CN" && "$device" == "Oneplus Ace 6T" ]]; then
+            category="OxygenOS Flashers"
+            rel="$device/$category"
+          else
+            if [[ "$ftype" =~ ^(SuperHybrid\ Flasher|Super\ Flasher)$ ]]; then
+              category="Super Flashers"
+            else
+              category="Regional Flashers"
+            fi
+            rel="$device/$category"
+          fi
+
+          # -----------------------------
+          # Devices that do NOT get region subfolders
+          # -----------------------------
+          no_region_devices=(
+            "Oneplus Ace 6T"
+          )
+
+          needs_region=1
+          for n in "${no_region_devices[@]}"; do
+            [[ "$n" == "$device" ]] && needs_region=0
+          done
+
+          # -----------------------------
+          # Region subfolder (COS / Global / EU / IN / NA)
+          # -----------------------------
+          if [[ $needs_region -eq 1 ]]; then
+            case "$region" in
+              CN)  region_folder="COS" ;;
+              GLO) region_folder="Global" ;;
+              EU)  region_folder="EU" ;;
+              IN)  region_folder="IN" ;;
+              NA)  region_folder="NA" ;;
+              *)   region_folder="$region" ;;
+            esac
+            rel="$rel/$region_folder"
+          fi
+
+          # -----------------------------
+          # Normalize + export
+          # -----------------------------
+          rel="${rel//\\//}"
+          [[ "${rel: -1}" == "/" ]] || rel="${rel}/"
+          echo "REL_UPLOAD_DIR=$rel" >> "$GITHUB_ENV"
+          # The SFTP account starts directly in its /Files directory.
+          # Keep this path relative: adding "Files/" here would upload to /Files/Files/.
+          echo "SFTP_UPLOAD_DIR=$rel" >> "$GITHUB_ENV"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Upload to DS_SFTP
+        if: ${{ inputs.upload_to == 'DS_SFTP' }}
+        env:
+          DS_SFTP_HOST: ${{ secrets.DS_SFTP_HOST }}
+          DS_SFTP_USER: ${{ secrets.DS_SFTP_USER }}
+          DS_SFTP_PRIVATE_KEY: ${{ secrets.DS_SFTP_PRIVATE_KEY }}
+          DS_SFTP_KNOWN_HOSTS: ${{ secrets.DS_SFTP_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DS_SFTP_HOST:?Missing DS_SFTP_HOST}"
+          : "${DS_SFTP_USER:?Missing DS_SFTP_USER}"
+          : "${DS_SFTP_PRIVATE_KEY:?Missing DS_SFTP_PRIVATE_KEY}"
+          : "${DS_SFTP_KNOWN_HOSTS:?Missing DS_SFTP_KNOWN_HOSTS}"
+          command -v sftp >/dev/null 2>&1 || { echo "sftp client not found"; exit 1; }
+          command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen not found"; exit 1; }
+
+          remote_dir="$(printf "%s" "$SFTP_UPLOAD_DIR" | sed 's#^/*##; s#/*$##')"
+          file_name="${ARTIFACT_NAME}.zip"
+          zip_path="$ZIP_FILE"
+          [ -f "$zip_path" ] || { echo "ZIP not found: $zip_path"; exit 1; }
+
+          if [[ -z "$remote_dir" || "$remote_dir" == /* || "$remote_dir" == *..* ]]; then
+            echo "Unsafe SFTP upload directory: $remote_dir"
+            exit 1
+          fi
+          case "${remote_dir}${file_name}${zip_path}" in
+            *$'\n'*|*$'\r'*|*'"'*)
+              echo "Unsupported quote or newline in SFTP path"
+              exit 1
+              ;;
+          esac
+
+          ssh_tmp="$(mktemp -d "${RUNNER_TEMP}/ds-sftp.XXXXXX")"
+          trap 'rm -rf -- "$ssh_tmp"' EXIT
+          key_file="$ssh_tmp/id_ed25519"
+          known_hosts_file="$ssh_tmp/known_hosts"
+          batch_file="$ssh_tmp/upload.batch"
+
+          printf '%s\n' "$DS_SFTP_PRIVATE_KEY" > "$key_file"
+          printf '%s\n' "$DS_SFTP_KNOWN_HOSTS" > "$known_hosts_file"
+          chmod 600 "$key_file" "$known_hosts_file"
+          ssh-keygen -y -f "$key_file" >/dev/null
+          ssh-keygen -lf "$known_hosts_file" -E sha256 \
+            | awk '{print $2}' \
+            | grep -Fx 'SHA256:/iJcgY2EReHPrZbmvttIBRyk3UxqCH4RQr6byGj1dPU' >/dev/null \
+            || { echo "Unexpected SFTP host key"; exit 1; }
+
+          current=""
+          IFS='/' read -r -a path_parts <<< "$remote_dir"
+          for part in "${path_parts[@]}"; do
+            [[ -n "$part" ]] || continue
+            current="${current:+$current/}$part"
+            printf -- '-mkdir "%s"\n' "$current" >> "$batch_file"
+          done
+
+          remote_file="${remote_dir}/${file_name}"
+          remote_part="${remote_file}.filepart"
+          {
+            printf -- '-rm "%s"\n' "$remote_part"
+            printf 'put "%s" "%s"\n' "$zip_path" "$remote_part"
+            printf 'chmod 0664 "%s"\n' "$remote_part"
+            printf 'rename "%s" "%s"\n' "$remote_part" "$remote_file"
+          } >> "$batch_file"
+
+          echo "Uploading via SFTP to /Files/${remote_file}"
+          sftp -q -P 2022 \
+            -i "$key_file" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$known_hosts_file" \
+            -b "$batch_file" \
+            "${DS_SFTP_USER}@${DS_SFTP_HOST}"
+               
+      # ===============================================================================
+      # ===============================================================================
+
+
+      - name: Telegram notify
+        if: ${{ inputs.upload_to == 'DS_SFTP' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C.UTF-8
+          export LANG=C.UTF-8
+
+          device_disp="${{ inputs.device }}"
+          region="$REGION"
+          type="$FTYPE"
+          version="${OTA_VERSION:-UNKNOWN}"
+          artifact="$ARTIFACT_NAME"
+          sftp_rel_dir="$SFTP_UPLOAD_DIR"
+
+          # -----------------------------
+          # Device -> Chat ID mapping
+          # -----------------------------
+          chat_id=""
+          chat_name=""
+          case "$device_disp" in
+            "Oneplus 15R"|"Oneplus Ace 6T")
+              chat_id="-1001903485514"
+              chat_name="Oneplus 15 Group"
+              ;;
+            *)
+              echo "ℹ️ Telegram: No group mapping for device '$device_disp' -> skipping notify."
+              exit 0
+              ;;
+          esac
+
+          # -----------------------------
+          # Build links (same logic as before)
+          # -----------------------------
+          raw_path="Files/${sftp_rel_dir}${artifact}.zip"
+          enc_raw="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$raw_path")"
+          enc_raw="${enc_raw//%20/+}"
+          zip_link="https://roms.danielspringer.at/download.php?file=${enc_raw}&download=true"
+
+          zip_dir="$sftp_rel_dir"
+          zip_dir="${zip_dir#Files/}"
+          zip_dir="${zip_dir#/}"
+          zip_plain="${zip_dir}${artifact}.zip"
+
+          zip_param="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$zip_plain")"
+          zip_param="${zip_param//%20/+}"
+
+          if [[ "$region" == "CN" ]]; then
+            img_folder="COS_FILES_HERE"
+          else
+            img_folder="OOS_FILES_HERE"
+          fi
+
+          boot_param="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "${img_folder}/boot.img")"
+          boot_param="${boot_param//%20/+}"
+          init_boot_param="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "${img_folder}/init_boot.img")"
+          init_boot_param="${init_boot_param//%20/+}"
+
+          boot_link="https://roms.danielspringer.at/index.php?action=download_from_zip&zip=${zip_param}&file=${boot_param}"
+          init_boot_link="https://roms.danielspringer.at/index.php?action=download_from_zip&zip=${zip_param}&file=${init_boot_param}"
+
+          # Resolve an exact changelog for this uploaded ZIP. The resolver
+          # returns 302 only when the package exists and its device, region
+          # and version map to one unambiguous changelog.
+          changelog_link=""
+          changelog_status="$(
+            curl -sS --head --max-time 15 -o /dev/null -w '%{http_code}' \
+              --get "https://roms.danielspringer.at/index.php" \
+              --data-urlencode "view=changelog" \
+              --data-urlencode "package=${zip_plain}" \
+            || true
+          )"
+          if [[ "$changelog_status" == "302" ]]; then
+            changelog_param="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$zip_plain")"
+            changelog_link="https://roms.danielspringer.at/index.php?view=changelog&package=${changelog_param}#changelog-view"
+          fi
+
+          # -----------------------------
+          # Always log what would happen
+          # -----------------------------
+          echo "================ Telegram notify (dry info) ================"
+          echo "Device:   $device_disp"
+          echo "Region:   $region  -> img_folder=$img_folder"
+          echo "Type:     $type"
+          echo "Version:  $version"
+          echo "Artifact: $artifact"
+          echo "Target:   $chat_name ($chat_id)"
+          echo "ZIP:      $zip_link"
+          echo "boot.img: $boot_link"
+          echo "init_boot.img: $init_boot_link"
+          if [[ -n "$changelog_link" ]]; then
+            echo "Changelog: available ($changelog_status)"
+          else
+            echo "Changelog: unavailable ($changelog_status) -> button omitted"
+          fi
+          echo "notify_telegram input: ${{ inputs.notify_telegram }}"
+          echo "============================================================"
+
+          # -----------------------------
+          # Send only if enabled
+          # -----------------------------
+          if [[ "${{ inputs.notify_telegram }}" != "true" ]]; then
+            echo "ℹ️ Telegram: notify_telegram=false -> not sending (log-only)."
+            exit 0
+          fi
+
+          payload_path="$RUNNER_TEMP/tg_payload.json"
+          CHAT_ID="$chat_id" DEVICE="$device_disp" REGION="$region" TYPE="$type" VERSION="$version" ARTIFACT="$artifact" ZIP="$zip_link" BOOT="$boot_link" INIT="$init_boot_link" CHANGELOG="$changelog_link" OUT="$payload_path" \
+          python3 -c 'import os,json,html; chat_id=int(os.environ["CHAT_ID"]); device=html.escape(os.environ["DEVICE"]); region=html.escape(os.environ["REGION"]); typ=html.escape(os.environ["TYPE"]); version=html.escape(os.environ["VERSION"]); artifact=html.escape(os.environ["ARTIFACT"]); zip_url=os.environ["ZIP"]; boot_url=os.environ["BOOT"]; init_boot_url=os.environ["INIT"]; changelog_url=os.environ["CHANGELOG"]; text="🚀 <b>New Build Released</b>\n"+f"📱 <b>Device</b>  <code>{device}</code>\n"+f"🌍 <b>Region</b>  <code>{region}</code>\n"+f"🧩 <b>Type</b>    <code>{typ}</code>\n"+f"🏷️ <b>Version</b> <code>{version}</code>\n\n"+"📦 <b>Package</b>\n"+f"<code>{artifact}</code>\n\n"+"⬇️ Choose a download below."; package_row=[{"text":"⬇️ Full ZIP","url":zip_url}]; package_row.extend([{"text":"📋 Changelog","url":changelog_url}] if changelog_url else []); keyboard=[package_row,[{"text":"🧱 boot.img","url":boot_url},{"text":"🧱 init_boot.img","url":init_boot_url}]]; p={"chat_id":chat_id,"text":text,"parse_mode":"HTML","disable_web_page_preview":True,"reply_markup":{"inline_keyboard":keyboard}}; open(os.environ["OUT"],"w",encoding="utf-8").write(json.dumps(p, ensure_ascii=False,separators=(",",":")))'
+
+          test -s "$payload_path" || { echo "Telegram payload not created"; exit 1; }
+
+          curl -fsS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -H "Content-Type: application/json; charset=utf-8" \
+               --data-binary "@${payload_path}"
+
+          echo "✅ Telegram: sent to $chat_name ($chat_id)."
+
+
+
+
+      - name: Cleanup runner workspace
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Cleaning workspace: $GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo "✅ Workspace cleaned."
