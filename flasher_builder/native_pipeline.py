@@ -176,7 +176,7 @@ def build_images(worker, assets, result, download, dev, kind, region, size, buil
         pack_super(worker, assets, super_dir, size)
         (super_dir / 'super.img').replace(result / 'super.img')
         if dev == 'X9U':
-            (result / 'META-INF/com/google/android/super-size').write_text(str(size) + '\n', encoding='ascii')
+            (result / 'META-INF/com/google/android/super-size').write_bytes((str(size) + '\n').encode('ascii'))
         shutil.rmtree(super_dir)
         for name in ('dtbo.img', 'dtbo_patched.img', 'dtbo_patcher.sh', 'dtbo_patcher.py', 'dtbo_patcher'):
             (result / name).unlink(missing_ok=True)

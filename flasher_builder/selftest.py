@@ -378,7 +378,7 @@ def run_self_test(args):
                     raise BuildError('Self-test: X9U ABL selection is incorrect.')
                 if 'Super' in kind:
                     expected_size = 19671285760 if region == 'CN' else 20451426304
-                    if int(archive.read('META-INF/com/google/android/super-size')) != expected_size:
+                    if archive.read('META-INF/com/google/android/super-size') != (str(expected_size)+'\n').encode('ascii'):
                         raise BuildError('Self-test: X9U recovery super size is incorrect.')
                     if 'OTA_FILES_HERE' not in archive.read('META-INF/com/google/android/aera-installer').decode():
                         raise BuildError('Self-test: X9U recovery image layout is incorrect.')

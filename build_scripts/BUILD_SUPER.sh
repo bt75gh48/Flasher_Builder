@@ -190,7 +190,7 @@ with (root/'super.img').open('rb') as stream:
     header = stream.read(28)
 magic, major, minor, file_header, chunk_header, block_size, blocks, chunks, checksum = struct.unpack('<IHHHHIIII', header)
 assert magic == 0xed26ff3a and major == 1 and block_size and blocks
-(root/'META-INF/com/google/android/super-size').write_text(str(block_size*blocks)+'\n',encoding='ascii')
+(root/'META-INF/com/google/android/super-size').write_bytes((str(block_size*blocks)+'\n').encode('ascii'))
 PYMETA
 fi
 
