@@ -35,7 +35,7 @@ def stage(worker, assets, destination, dev, kind, region, source):
     result = destination / name
     template = assets / 'flasher_scripts' / dev / template_subtree(dev, region) / ('super' if 'Super' in kind else 'regional')
     copy_tree(worker, template, result)
-    if dev == 'X9U' and 'Hybrid' not in kind:
+    if dev == 'X9U' and 'Super' not in kind:
         shutil.rmtree(result / 'META-INF', ignore_errors=True)
     # Recovery's updater-script must retain Unix line endings on Windows too.
     for script in result.rglob('updater-script'):
@@ -54,6 +54,8 @@ def stage(worker, assets, destination, dev, kind, region, source):
     main = bloat_folder(dev, kind, region)
     for relative in selected_paths(manifest, dev, kind, region):
         path = PurePosixPath(relative)
+        if dev == 'X9U' and path.name == 'abl-16.0.6.img':
+            continue  # Kept in the bloat cache; the explicit ABL choice applies it after extraction.
         if len(path.parts) != 4:
             continue  # Legacy nested archival copies are not staging inputs.
         folder = path.parts[-2]
@@ -173,6 +175,8 @@ def build_images(worker, assets, result, download, dev, kind, region, size, buil
             worker.copy(odm, super_dir / 'odm.img')
         pack_super(worker, assets, super_dir, size)
         (super_dir / 'super.img').replace(result / 'super.img')
+        if dev == 'X9U':
+            (result / 'META-INF/com/google/android/super-size').write_text(str(size) + '\n', encoding='ascii')
         shutil.rmtree(super_dir)
         for name in ('dtbo.img', 'dtbo_patched.img', 'dtbo_patcher.sh', 'dtbo_patcher.py', 'dtbo_patcher'):
             (result / name).unlink(missing_ok=True)

@@ -294,7 +294,7 @@ def package(worker, result, dest):
                 info = zipfile.ZipInfo.from_file(path, path.relative_to(result).as_posix())
                 # Windows stat() cannot preserve Unix executable bits. Recovery
                 # and Linux launchers in a Windows-built package still need them.
-                executable = path.suffix == '.sh' or path.name in ('update-binary', 'pack_super', 'unpack_super', 'pack_super_regional', 'volprompt')
+                executable = path.suffix == '.sh' or path.name in ('update-binary', 'aera-installer', 'pack_super', 'unpack_super', 'pack_super_regional', 'volprompt')
                 if path.suffix not in ('.img', '.zip'):
                     with path.open('rb') as header:
                         executable = executable or header.read(4) == b'\x7fELF'
@@ -479,11 +479,28 @@ def build_log(job):
         raise
 
 
+def pack_vulnerable_abl(worker, repo, image_directory, region='EU', bloat_directory=None):
+    from scripts.materialize_bloat import bloat_folder
+    folder = bloat_folder('X9U', 'Super Flasher', region)
+    source = Path(bloat_directory or Path(repo)/'bloat') / 'X9U' / folder / 'abl-16.0.6.img'
+    expected = '4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d'
+    if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+        raise BuildError('The X9U ABL 16.0.6 bloat image is missing or has an incorrect checksum. Complete Download bloat in step 2.')
+    worker.check()
+    worker.copy(source, Path(image_directory) / 'abl.img')
+    print('Packed X9U vulnerable ABL 16.0.6 as abl.img.', flush=True)
+    return dict(version='16.0.6', sha256=expected, bytes=source.stat().st_size)
+
+
 def build(args):
     repo = Path(args.repo).resolve()
     check_environment(repo)
     catalog = Catalog(repo)
     dev, builder, template = catalog.selection(args.device, args.kind, args.region)
+    if dev == 'X9U' and getattr(args, 'vulnerable_abl', None) is None:
+        raise BuildError('Choose Yes (--vulnerable-abl) or No (--stock-abl) for X9U ABL before building.')
+    if getattr(args, 'vulnerable_abl', False) and dev != 'X9U':
+        raise BuildError('The vulnerable ABL option is available only for X9U builds.')
     require_local_bloat(args, repo, dev)
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -529,6 +546,9 @@ def build(args):
         if not result.is_dir():
             raise BuildError(f'Builder did not create the expected output: {result}')
         boot_dir = result / image_folder(dev, args.region)
+        abl_receipt = None
+        if getattr(args, 'vulnerable_abl', False):
+            abl_receipt = pack_vulnerable_abl(worker, repo, boot_dir, args.region, source)
         if not (boot_dir / 'boot.img').is_file():
             raise BuildError('Build output has no boot.img. The OTA may be incomplete or incompatible.')
         if 'Super' in args.kind and not (result / 'super.img').is_file():
@@ -549,6 +569,7 @@ def build(args):
                         version=version, artifact=filename, created=time.strftime('%Y-%m-%dT%H:%M:%S'),
                         test_fixture=bool(getattr(args, 'fixture', False)), output_format='folder' if no_zip else 'zip')
         if odm_receipt is not None: manifest['odm_source'] = odm_receipt
+        if abl_receipt is not None: manifest['abl_source'] = abl_receipt
         (job / 'build.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
         print('Removing temporary working files…', flush=True)
         for directory in (assets, job / 'stage', download):
@@ -601,6 +622,9 @@ def main():
     parser.add_argument('--base', default='')
     parser.add_argument('--output', default=str(ROOT / 'builds'))
     parser.add_argument('--no-zip', action='store_true', help='Keep the finished flasher folder instead of creating a ZIP.')
+    abl_choice = parser.add_mutually_exclusive_group()
+    abl_choice.add_argument('--vulnerable-abl', dest='vulnerable_abl', action='store_true', default=None, help='X9U only: replace the extracted abl.img with ABL 16.0.6.')
+    abl_choice.add_argument('--stock-abl', dest='vulnerable_abl', action='store_false', help='X9U only: keep the extracted OTA ABL.')
     parser.add_argument('--cancel')
     args = parser.parse_args()
     try:

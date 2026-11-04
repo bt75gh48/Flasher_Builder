@@ -544,7 +544,8 @@ class App(QMainWindow):
         self.pages.addWidget(self.documentation_page())
         body.addWidget(self.pages, 1)
         footer = QHBoxLayout()
-        footer.addWidget(label('CONFIGURE → BLOAT FILES → OTA → BUILD', 'eyebrow'))
+        self.workflow_hint = label('CONFIGURE → BLOAT FILES → OTA → BUILD', 'eyebrow')
+        footer.addWidget(self.workflow_hint)
         footer.addStretch()
         footer.addWidget(label('Qt 6  /  Local workspace', 'muted'))
         body.addLayout(footer)
@@ -552,7 +553,7 @@ class App(QMainWindow):
 
     def build_page(self):
         page = QWidget(); page.setObjectName('innerPanel')
-        layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(10)
+        layout = QVBoxLayout(page); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(8)
         top = QHBoxLayout(); top.setSpacing(16)
         configure, form = card()
         title = QHBoxLayout()
@@ -718,6 +719,25 @@ class App(QMainWindow):
             frame.layout().setSpacing(8)
         layout.addLayout(top)
         layout.addWidget(source_card)
+        self.abl_card, abl_layout = card()
+        abl_layout.setContentsMargins(18, 4, 18, 4); abl_layout.setSpacing(0)
+        abl_heading = QHBoxLayout()
+        abl_heading.setSpacing(10)
+        abl_heading.addWidget(label('04', 'sectionNumber'))
+        abl_heading.addWidget(label('Vulnerable ABL', 'cardTitle'))
+        self.abl_hint = label('Choose Yes or No to continue.', 'hint')
+        abl_heading.addWidget(self.abl_hint)
+        abl_heading.addStretch()
+        abl_heading.addWidget(label('Pack ABL 16.0.6?', 'fieldLabel'))
+        self.abl_group = QButtonGroup(self)
+        self.abl_yes = button('Yes', name='region'); self.abl_no = button('No', name='region')
+        for value, control in ((1, self.abl_yes), (0, self.abl_no)):
+            control.setCheckable(True); self.abl_group.addButton(control, value)
+            control.setAccessibleName('Pack vulnerable ABL: ' + control.text())
+            abl_heading.addWidget(control); self.inputs.append(control)
+        self.abl_group.buttonClicked.connect(self.zip_output_changed)
+        abl_layout.addLayout(abl_heading)
+        self.abl_card.hide(); layout.addWidget(self.abl_card)
         layout.addStretch(1)
         layout.addLayout(actions)
         self.fields['device'].addItems(list(self.catalog.devices))
@@ -956,6 +976,8 @@ class App(QMainWindow):
     def values(self):
         values = {k: widget.currentText() if isinstance(widget, QComboBox) else widget.text().strip() for k, widget in self.fields.items()} | {'region': self.region}
         values['zip_output'] = self.zip_build.isChecked()
+        choice = self.abl_group.checkedId()
+        values['vulnerable_abl'] = (None if choice == -1 else choice == 1) if self.fields['device'].currentText() == 'OPPO Find X9 Ultra' else False
         if self.ota_mode == 'catalog':
             for role in ('ota', 'base'):
                 entry = self.ota_combos[role].currentData()
@@ -968,6 +990,9 @@ class App(QMainWindow):
         return self.catalog.regions(self.fields['device'].currentText(), self.fields['kind'].currentText())
 
     def device_changed(self):
+        self.abl_group.setExclusive(False)
+        self.abl_yes.setChecked(False); self.abl_no.setChecked(False)
+        self.abl_group.setExclusive(True)
         previous = self.fields['kind'].currentText()
         combo = self.fields['kind']; combo.blockSignals(True)
         combo.clear(); combo.addItems(self.catalog.types(self.fields['device'].currentText()))
@@ -999,6 +1024,13 @@ class App(QMainWindow):
     def update_summary(self):
         if not self.fields['kind'].currentText(): return
         values = self.values()
+        x9u = values['device'] == 'OPPO Find X9 Ultra'
+        self.abl_card.setVisible(x9u)
+        self.workflow_hint.setText('CONFIGURE → BLOAT FILES → OTA → ABL → BUILD' if x9u else 'CONFIGURE → BLOAT FILES → OTA → BUILD')
+        if x9u:
+            choice = values['vulnerable_abl']
+            self.abl_hint.setText('Choose Yes or No to continue.' if choice is None else
+                                 'ABL 16.0.6 will be packed.' if choice else 'The OTA’s ABL will be kept.')
         needs_base = values['device'] == 'Oneplus Ace 6' and values['kind'] == 'SuperHybrid Flasher' and self.region == 'IN'
         self.base_panel.setVisible(needs_base and self.ota_mode != 'catalog')
         self.refresh_ota_context()
@@ -1050,6 +1082,7 @@ class App(QMainWindow):
     def update_build_gate(self):
         enabled = not self.busy and not self.bloat_deleting
         self.ota_card.setEnabled(enabled and self.selection_valid)
+        self.abl_card.setEnabled(enabled and self.selection_valid)
         error = self.build_requirements_error()
         self.start_button.setEnabled(enabled and not error)
         self.start_button.setToolTip(error or 'Build the package')
@@ -1058,6 +1091,8 @@ class App(QMainWindow):
     def build_requirements_error(self):
         if not self.selection_valid:
             return 'Choose a supported device, flasher type and region.'
+        if self.values()['vulnerable_abl'] is None:
+            return 'Step 4: choose Yes or No for vulnerable ABL before building.'
         if not self.local_bloat_ready():
             return 'Required bloat files must be downloaded and verified before building.'
         values = self.values()
@@ -1260,7 +1295,7 @@ class App(QMainWindow):
     def save_preferences(self, values):
         try:
             self.settings.write_text(json.dumps({k: values[k] for k in
-                ('device', 'kind', 'region', 'output', 'distro', 'bloat_dir', 'zip_output')}, indent=2) + '\n', encoding='utf-8')
+                ('device', 'kind', 'region', 'output', 'distro', 'bloat_dir', 'zip_output', 'vulnerable_abl')}, indent=2) + '\n', encoding='utf-8')
         except OSError as e:
             self.log.appendPlainText('Could not save preferences: ' + str(e))
 
@@ -1657,6 +1692,7 @@ def main():
         if '--smoke-test' in sys.argv:
             output = Path(sys.argv[sys.argv.index('--test-output') + 1]) if '--test-output' in sys.argv else ROOT / 'builds' / 'qt-smoke-test'
             output.mkdir(parents=True, exist_ok=True)
+            window.settings = output / 'settings.json'
             window.fields['output'].setText(str(output.resolve()))
             started = time.monotonic()
             def launch_test():
@@ -1672,8 +1708,22 @@ def main():
                 window.documentation_search.setText('bloat')
                 documentation_ok = documentation_ok and window.documentation_view.textCursor().selectedText().lower() == 'bloat'
                 success = success and documentation_ok
+                window.fields['device'].setCurrentText('OPPO Find X9 Ultra')
+                abl_choice_ok = (window.values()['vulnerable_abl'] is None and not window.abl_card.isHidden()
+                                 and not window.start_button.isEnabled() and 'Step 4' in window.build_requirements_error())
+                window.abl_yes.click()
+                yes_command = Runtime().command(window.values(), 'build', str(output/'cancel'))
+                abl_choice_ok = abl_choice_ok and window.values()['vulnerable_abl'] is True and '--vulnerable-abl' in yes_command
+                window.abl_no.click()
+                no_command = Runtime().command(window.values(), 'build', str(output/'cancel'))
+                abl_choice_ok = abl_choice_ok and window.values()['vulnerable_abl'] is False and '--stock-abl' in no_command
+                window.fields['device'].setCurrentText('Oneplus 13')
+                abl_choice_ok = abl_choice_ok and window.abl_card.isHidden()
+                window.fields['device'].setCurrentText('OPPO Find X9 Ultra')
+                abl_choice_ok = abl_choice_ok and window.values()['vulnerable_abl'] is None
+                success = success and abl_choice_ok
                 (output / 'qt-smoke-test.log').write_text(window.log.toPlainText(), encoding='utf-8')
-                (output / 'qt-smoke-test.json').write_text(json.dumps({'passed': success, 'status': window.status.text(), 'frozen': bool(getattr(sys, 'frozen', False)), 'app_version': __version__, 'documentation_in_app': documentation_ok}, indent=2) + '\n', encoding='utf-8')
+                (output / 'qt-smoke-test.json').write_text(json.dumps({'passed': success, 'status': window.status.text(), 'frozen': bool(getattr(sys, 'frozen', False)), 'app_version': __version__, 'documentation_in_app': documentation_ok, 'x9u_abl_choice_required': abl_choice_ok}, indent=2) + '\n', encoding='utf-8')
                 window.navigate(0)
                 window.grab().save(str(output / 'qt-preview.png'))
                 application.exit(0 if success else 1)

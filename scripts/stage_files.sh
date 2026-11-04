@@ -189,7 +189,7 @@ if [ ! -d "$tpl_base" ]; then
 fi
 
 rsync -a "$tpl_base/" "$work_dir/"
-if [[ "$dev" == "X9U" && "$ftype" != *Hybrid* ]]; then
+if [[ "$dev" == "X9U" && "$ftype" != *Super* ]]; then
   rm -rf "$work_dir/META-INF"
 fi
 

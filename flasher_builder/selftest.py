@@ -182,6 +182,7 @@ def run_self_test(args):
                 (folder / (name + '.img')).write_bytes(b'\0' * 4096)
     partitions = {name: (('TEST ONLY ' + name + '\n').encode() * 300)[:4096].ljust(4096, b'\0')
                   for name in ('boot', 'init_boot', 'system', 'system_ext', 'product', 'vendor', 'vendor_dlkm', 'odm', 'system_dlkm', 'my_region', 'my_bigball', 'my_carrier', 'my_engineering', 'my_heytap', 'my_manifest', 'my_product', 'my_stock', 'my_preload', 'my_company', 'system_dlkm_oki')}
+    partitions['abl'] = b'TEST ONLY STOCK ABL\n'.ljust(4096, b'A')
     # Ace6's real builder reads and rewrites vbmeta using the bundled avbtool.
     vbmeta = base / 'vbmeta.img'
     worker.run(helper_command(repo, 'avbtool', 'make_vbmeta_image', '--output', vbmeta, '--padding_size', '4096'))
@@ -346,17 +347,43 @@ def run_self_test(args):
             materializer.release_url, materializer.CANCEL_FILE = original_url, original_cancel
     if (fixture/'bloat/X9U/EU_BLOAT/my_preload.img').read_bytes()!=preload:
         raise BuildError('Self-test: multipart bloat image bytes differ.')
+    # The optional ABL is a shared bloat asset, rather than an app binary asset.
+    abl_key = '4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d'
+    published = materializer.load_manifest(repo/'bloat/assets-manifest.json')
+    abl_asset = published['assets'][abl_key]
+    abl_path = 'bloat/X9U/EU_BLOAT/abl-16.0.6.img'
+    abl_manifest = dict(published, assets={abl_key:abl_asset}, files={abl_path:abl_key})
+    materializer.materialize(fixture,base/'abl-cache',abl_manifest,'X9U','Super Flasher','EU',source=repo/'bloat')
+    abl_data = (fixture/abl_path).read_bytes()
+    manifest['assets'][abl_key] = abl_asset
+    for region in regions:
+        folder = fixture/'bloat/X9U'/f'{region}_BLOAT'
+        (folder/'abl-16.0.6.img').write_bytes(abl_data)
+        manifest['files'][f'bloat/X9U/{region}_BLOAT/abl-16.0.6.img'] = abl_key
+    (fixture/'bloat/assets-manifest.json').write_text(json.dumps(manifest),encoding='utf-8')
     for kind in ('Super Flasher','Regional Flasher'):
         for region in regions:
             print(f'\nSELF-TEST: Find X9 Ultra / {kind} / {region}',flush=True)
+            vulnerable_abl = kind == 'Super Flasher' and region == 'IN'
             dest=build(Namespace(repo=str(fixture),output=str(base/'results'),device='OPPO Find X9 Ultra',
-                kind=kind,region=region,ota=str(ota),base='',cancel=args.cancel,fixture=True))
+                kind=kind,region=region,ota=str(ota),base='',cancel=args.cancel,fixture=True,vulnerable_abl=vulnerable_abl))
             expected_preload=regional_preloads[region]
             with zipfile.ZipFile(dest) as archive:
                 if archive.read('OTA_FILES_HERE/boot.img')!=partitions['boot']:
                     raise BuildError('Self-test: X9U boot image folder is incorrect.')
-                if any(name.startswith('META-INF/') for name in archive.namelist()):
-                    raise BuildError('Self-test: fastboot-only X9U build contains recovery metadata.')
+                expected_abl = abl_data if vulnerable_abl else partitions['abl']
+                if any(name.endswith('/abl-16.0.6.img') for name in archive.namelist()):
+                    raise BuildError('Self-test: ABL support file leaked into the flashable package.')
+                if archive.read('OTA_FILES_HERE/abl.img') != expected_abl:
+                    raise BuildError('Self-test: X9U ABL selection is incorrect.')
+                if 'Super' in kind:
+                    expected_size = 19671285760 if region == 'CN' else 20451426304
+                    if int(archive.read('META-INF/com/google/android/super-size')) != expected_size:
+                        raise BuildError('Self-test: X9U recovery super size is incorrect.')
+                    if 'OTA_FILES_HERE' not in archive.read('META-INF/com/google/android/aera-installer').decode():
+                        raise BuildError('Self-test: X9U recovery image layout is incorrect.')
+                elif any(name.startswith('META-INF/') for name in archive.namelist()):
+                    raise BuildError('Self-test: regional X9U build contains recovery metadata.')
                 if 'Super' in kind:
                     image=archive.read('super.img');block_size,blocks=struct.unpack_from('<II',image,12)
                     if block_size*blocks!=(19671285760 if region=='CN' else 20451426304):
@@ -368,4 +395,4 @@ def run_self_test(args):
                         if archive.read('OTA_FILES_HERE/'+name+'.img')!=data:
                             raise BuildError('Self-test: OTA extraction overwrote staged X9U bloat.')
     (base / 'SELF-TEST-PASSED.txt').write_text('All pipeline builds, regional bloat mapping and multipart transport passed with the REAL otaripper, lpmake and avbtool.\nGenerated packages contain test bytes. DO NOT FLASH.\n', encoding='utf-8')
-    print('\nSELF-TEST PASSED: extraction, three builders, sparse super image, vbmeta patching, ZIP integrity, SHA-256, unzipped folder output, remote patch-matched ODM only, regional super sizes and multipart bloat, regional bloat mapping, reconstructed NA packages.', flush=True)
+    print('\nSELF-TEST PASSED: extraction, three builders, sparse super image, vbmeta patching, ZIP integrity, SHA-256, unzipped folder output, remote patch-matched ODM only, regional super sizes and multipart bloat, regional bloat mapping, reconstructed NA packages, X9U hybrid recovery and shared ABL choices.', flush=True)

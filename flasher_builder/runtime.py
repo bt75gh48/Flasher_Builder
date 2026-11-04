@@ -34,6 +34,10 @@ class Runtime:
                     '--download-path', self.path(values['download_path'])]
         if action == 'build' and not values.get('zip_output', True):
             cmd += ['--no-zip']
+        if action == 'build' and values['device'] == 'OPPO Find X9 Ultra':
+            if values.get('vulnerable_abl') is None:
+                raise ValueError('Choose Yes or No for vulnerable ABL before building.')
+            cmd += ['--vulnerable-abl' if values['vulnerable_abl'] else '--stock-abl']
         for key in ('ota', 'base'):
             if values.get(key + '_catalog_id'):
                 cmd += ['--' + key + '-catalog-id', values[key + '_catalog_id']]

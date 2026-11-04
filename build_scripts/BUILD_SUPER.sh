@@ -180,6 +180,20 @@ else
   exit 1
 fi
 
+# Recovery metadata follows the actual sparse image size for CN and non-CN.
+if [[ "${DEV:-}" == "X9U" ]]; then
+  python3 - "$super_dest" <<'PYMETA'
+import struct, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+with (root/'super.img').open('rb') as stream:
+    header = stream.read(28)
+magic, major, minor, file_header, chunk_header, block_size, blocks, chunks, checksum = struct.unpack('<IHHHHIIII', header)
+assert magic == 0xed26ff3a and major == 1 and block_size and blocks
+(root/'META-INF/com/google/android/super-size').write_text(str(block_size*blocks)+'\n',encoding='ascii')
+PYMETA
+fi
+
 #--------------------
 # Remove scrap files
 #--------------------

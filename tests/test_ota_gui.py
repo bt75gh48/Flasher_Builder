@@ -63,6 +63,28 @@ class OtaGuiTests(unittest.TestCase):
         self.assertEqual(self.window.values()['ota'], '/tmp/manual.zip')
         self.fetch.assert_called_once()
 
+    def test_x9u_step_four_requires_an_explicit_yes_or_no(self):
+        self.assertTrue(self.window.abl_card.isHidden())
+        self.window.fields['device'].setCurrentText('OPPO Find X9 Ultra')
+        self.assertFalse(self.window.abl_card.isHidden())
+        self.assertIsNone(self.window.values()['vulnerable_abl'])
+        self.assertFalse(self.window.start_button.isEnabled())
+        self.assertIn('Step 4',self.window.build_requirements_error())
+        with self.assertRaisesRegex(ValueError,'Choose Yes or No'):
+            Runtime().command(self.window.values(),'build',str(self.root/'cancel'))
+        self.window.abl_yes.click()
+        self.assertTrue(self.window.values()['vulnerable_abl'])
+        self.assertIn('--vulnerable-abl',Runtime().command(self.window.values(),'build',str(self.root/'cancel')))
+        self.window.abl_no.click()
+        self.assertFalse(self.window.abl_yes.isChecked())
+        self.assertFalse(self.window.values()['vulnerable_abl'])
+        self.assertIn('--stock-abl',Runtime().command(self.window.values(),'build',str(self.root/'cancel')))
+        self.window.fields['device'].setCurrentText('Oneplus 13')
+        self.assertTrue(self.window.abl_card.isHidden())
+        self.assertFalse(self.window.values()['vulnerable_abl'])
+        self.window.fields['device'].setCurrentText('OPPO Find X9 Ultra')
+        self.assertIsNone(self.window.values()['vulnerable_abl'])
+
     def test_na_feed_switches_for_both_devices_and_returns_to_regular_catalog(self):
         for device,id in (('OP 13','na13'),('OP 15','na15')):
             self.catalog['releases'].append(dict(entry(id,device,'NA'),package_type='reconstructed_full'))

@@ -46,6 +46,8 @@ def main():
         if not smoke['passed'] or not smoke['frozen']: raise RuntimeError('Frozen GUI smoke test failed.')
         if smoke.get('documentation_in_app') is not True:
             raise RuntimeError('Packaged documentation viewer failed.')
+        if smoke.get('x9u_abl_choice_required') is not True:
+            raise RuntimeError('Packaged X9U Yes/No ABL choice failed.')
         download_log = (root / 'smoke/qt-smoke-test.log').read_text(encoding='utf-8')
         if 'Downloading with aria2c' not in download_log or 'aria2c could not finish' in download_log:
             raise RuntimeError('Packaged aria2 download self-test failed.')
@@ -57,6 +59,8 @@ def main():
             raise RuntimeError('Packaged regional bloat self-test failed.')
         if 'reconstructed NA packages' not in download_log:
             raise RuntimeError('Packaged reconstructed NA self-test failed.')
+        if 'X9U hybrid recovery and shared ABL choices' not in download_log:
+            raise RuntimeError('Packaged X9U hybrid/ABL self-test failed.')
         logs.append(download_log)
         # Prove that a clean install can download public bloat over HTTPS with
         # the bundled aria2 and without the runner's GitHub credentials.
@@ -86,7 +90,8 @@ def main():
                       wsl_required=False, otaripper_version='3.5.0', app_version=smoke['app_version'],
                       bundled_aria2=True, aria2_version='1.37.0', download_pipeline_passed=True,
                       anonymous_bloat_download=True, remote_odm_streaming=True, documentation_in_app=True,
-                      regional_super_sizes=True, multipart_bloat=True, regional_bloat=True, reconstructed_na=True)
+                      regional_super_sizes=True, multipart_bloat=True, regional_bloat=True, reconstructed_na=True,
+                      x9u_hybrid=True, x9u_abl_choice_required=True, shared_vulnerable_abl=True)
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
         args.report.with_suffix('.log').write_text('\n'.join(logs), encoding='utf-8')

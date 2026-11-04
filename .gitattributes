@@ -1,3 +1,7 @@
 
 # Preserve upstream license and build-reference text exactly.
 tools/aria2/** -whitespace
+flasher_scripts/X9U/**/META-INF/com/google/android/update-binary text eol=lf
+flasher_scripts/X9U/**/META-INF/com/google/android/aera-installer text eol=lf
+flasher_scripts/X9U/**/META-INF/com/google/android/updater-script text eol=lf
+flasher_scripts/X9U/**/META-INF/com/aera/bin/* -text

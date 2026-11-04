@@ -608,6 +608,15 @@
       "raw_bytes": 723320832,
       "raw_sha256": "7a4e17df48fa71062c5ef01db124be234a5b6aa26f092b3e8b042b906d4d7d6b",
       "encoding": "identity"
+    },
+    "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d": {
+      "asset_id": 709787285,
+      "asset_name": "bloat-X9U-shared-abl-16.0.6-4ad7f1db0c92.img",
+      "bytes": 278328,
+      "sha256": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+      "raw_bytes": 278328,
+      "raw_sha256": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+      "encoding": "identity"
     }
   },
   "files": {
@@ -781,6 +790,18 @@
     "bloat/X9U/TW_BLOAT/my_preload.img": "6ec67ccf8a01226cf32c255c81bf0ea54638ec1dcfb67ebdfe77da3f68dc579f",
     "bloat/X9U/TW_BLOAT/my_company.img": "3c673be2229ba248bd7d551785f30d957936fb85aa497b6f99191457034d78d1",
     "bloat/X9U/VN_BLOAT/my_preload.img": "7a4e17df48fa71062c5ef01db124be234a5b6aa26f092b3e8b042b906d4d7d6b",
-    "bloat/X9U/VN_BLOAT/my_company.img": "3c673be2229ba248bd7d551785f30d957936fb85aa497b6f99191457034d78d1"
+    "bloat/X9U/VN_BLOAT/my_company.img": "3c673be2229ba248bd7d551785f30d957936fb85aa497b6f99191457034d78d1",
+    "bloat/X9U/APC_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/CN_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/EU_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/ID_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/IN_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/JP_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/MX_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/MY_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/SG_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/TH_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/TW_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d",
+    "bloat/X9U/VN_BLOAT/abl-16.0.6.img": "4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d"
   }
 }

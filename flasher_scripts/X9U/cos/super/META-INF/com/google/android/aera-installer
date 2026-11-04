@@ -1,0 +1,281 @@
+#!/system/bin/sh
+# Stock ColorOS X9U hybrid installer, adapted from the supplied AERA installer.
+RECOVERY_UI_FD="$2"
+OUTFD=/proc/self/fd/"$RECOVERY_UI_FD"
+ZIPFILE="$3"
+BYNAME=/dev/block/bootdevice/by-name
+BOOTCTL=/system/bin/bootctl
+TMPDIR=/tmp/x9u-stock-flasher.$$
+AERA_RESPONSE_DIR=/tmp/aera-installer
+SPARSE_WRITER="$TMPDIR/sparse_stream_writer"
+ZIP_STREAMER="$TMPDIR/zip_entry_streamer"
+SUPER_DEV="$BYNAME/super"
+AERA_NATIVE_UI=false
+[ "$(getprop ro.aera.build 2>/dev/null)" = aera ] && AERA_NATIVE_UI=true
+STREAM_PID=""
+cleanup() {
+  [ -z "$STREAM_PID" ] || { kill "$STREAM_PID" 2>/dev/null; wait "$STREAM_PID" 2>/dev/null; }
+  rm -rf "$TMPDIR"
+}
+trap cleanup 0
+trap 'exit 1' 1 2 15
+mkdir -p "$TMPDIR" || exit 1
+
+ui_print() {
+  echo "ui_print $1" >> "$OUTFD"
+  echo "ui_print" >> "$OUTFD"
+}
+
+show_progress() {
+  echo "progress $1 $2" >> "$OUTFD"
+}
+
+set_progress() {
+  echo "set_progress $1" >> "$OUTFD"
+}
+
+aera_emit() {
+  $AERA_NATIVE_UI || return 0
+  echo "$1" >> "$OUTFD"
+}
+
+aera_package() {
+  aera_emit "aera_package $1|$2|$3|$4"
+}
+
+aera_stage() {
+  aera_emit "aera_stage $1|$2|$3|$4|$5"
+}
+
+aera_status() {
+  aera_emit "aera_status $1"
+}
+
+aera_complete() {
+  aera_emit "aera_complete $1|$2"
+}
+
+aera_prompt() {
+  prompt_id="$1"
+  prompt_title="$2"
+  prompt_message="$3"
+  prompt_accept="$4"
+  prompt_decline="$5"
+  prompt_response="$AERA_RESPONSE_DIR/response.$prompt_id"
+
+  mkdir -p "$AERA_RESPONSE_DIR" || return 1
+  chmod 0700 "$AERA_RESPONSE_DIR" 2>/dev/null
+  rm -f "$prompt_response"
+  aera_emit "aera_prompt $prompt_id|$prompt_title|$prompt_message|$prompt_accept|$prompt_decline"
+
+  while [ ! -s "$prompt_response" ]; do
+    sleep 0.1
+  done
+  prompt_answer="$(head -n 1 "$prompt_response" 2>/dev/null)"
+  rm -f "$prompt_response"
+  [ "$prompt_answer" = "yes" ]
+}
+
+
+print_box_line() {
+  inner_width=31
+  text="$1"
+
+  len=${#text}
+  [ "$len" -gt "$inner_width" ] && len=$inner_width
+  text="$(printf '%s' "$text" | cut -c1-$inner_width)"
+
+  total_pad=$((inner_width - ${#text}))
+  left_pad=$((total_pad / 2))
+  right_pad=$((total_pad - left_pad))
+
+  left_spaces=""
+  right_spaces=""
+
+  i=0
+  while [ "$i" -lt "$left_pad" ]; do
+    left_spaces="${left_spaces} "
+    i=$((i + 1))
+  done
+
+  i=0
+  while [ "$i" -lt "$right_pad" ]; do
+    right_spaces="${right_spaces} "
+    i=$((i + 1))
+  done
+
+  ui_print "# ${left_spaces}${text}${right_spaces} #"
+}
+
+print_box() {
+  ui_print "###################################"
+  print_box_line "$1"
+  ui_print "###################################"
+  ui_print " "
+}
+
+installer_status() {
+  if $AERA_NATIVE_UI; then
+    aera_status "$1"
+  else
+    if [ -n "$2" ]; then
+      print_box "$2"
+    else
+      print_box "$1"
+    fi
+  fi
+}
+
+
+abort() {
+  aera_status "Installation stopped: $1"
+  ui_print "ERROR: $1"
+  exit 1
+}
+volume_key() {
+  while true; do
+    getevent -t -l -c 4 > "$TMPDIR/events" 2>&1 || return 2
+    grep -q 'KEY_VOLUMEUP[[:space:]]*DOWN' "$TMPDIR/events" && return 0
+    grep -q 'KEY_VOLUMEDOWN[[:space:]]*DOWN' "$TMPDIR/events" && return 1
+  done
+}
+confirm() {
+  if $AERA_NATIVE_UI; then
+    aera_prompt "$1-$$" "$2" "$3" "$4" "$5"
+  else
+    ui_print "$2"
+    ui_print "$3"
+    ui_print "Vol+ $4 / Vol- $5"
+    volume_key
+  fi
+}
+package_has_file() {
+  unzip -l "$ZIPFILE" "$1" 2>/dev/null | awk -v name="$1" '$4==name {found=1} END {exit !found}'
+}
+image_list() {
+  unzip -l "$ZIPFILE" 'OTA_FILES_HERE/*.img' 2>/dev/null |
+    awk '$4 ~ /^OTA_FILES_HERE\/[A-Za-z0-9_-]+\.img$/ {print $4}' | sort
+}
+is_logical() {
+  case "$1" in
+    my_bigball|my_carrier|my_company|my_engineering|my_heytap|my_manifest|my_preload|my_product|my_region|my_stock|odm|product|system|system_dlkm|system_dlkm_gki|system_dlkm_oki|system_ext|vendor|vendor_dlkm) return 0 ;;
+  esac
+  return 1
+}
+targets() {
+  if [ -e "$BYNAME/${1}_a" ] && [ -e "$BYNAME/${1}_b" ]; then
+    printf '%s\n' "$BYNAME/${1}_a" "$BYNAME/${1}_b"
+  elif [ ! -e "$BYNAME/${1}_a" ] && [ ! -e "$BYNAME/${1}_b" ] && [ -e "$BYNAME/$1" ]; then
+    printf '%s\n' "$BYNAME/$1"
+  else
+    return 1
+  fi
+}
+number_valid() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$1" in *[1-9]*) return 0 ;; *) return 1 ;; esac
+}
+size_le() {
+  # Some recovery shells implement test's numeric operators as signed 32-bit.
+  # These byte counts exceed that range; awk numbers are exact at these sizes.
+  awk -v left="$1" -v right="$2" 'BEGIN { exit !((left+0) <= (right+0)) }'
+}
+prepare_helpers() {
+  for helper in sparse_stream_writer zip_entry_streamer; do
+    unzip -p "$ZIPFILE" "META-INF/com/aera/bin/$helper" > "$TMPDIR/$helper" 2>/dev/null || abort "Missing $helper"
+    chmod 0755 "$TMPDIR/$helper" || abort "Could not prepare $helper"
+    "$TMPDIR/$helper" > "$TMPDIR/$helper-probe.log" 2>&1
+    [ "$?" -eq 2 ] || abort "$helper cannot run in this recovery"
+  done
+}
+preflight() {
+  [ -f "$ZIPFILE" ] || abort 'Missing package ZIP'
+  [ -x "$BOOTCTL" ] || abort 'Missing bootctl'
+  [ -e "$SUPER_DEV" ] || abort 'Missing super partition'
+  package_has_file super.img || abort 'Missing root-level super.img'
+  EXPECTED_SUPER_BYTES="$(unzip -p "$ZIPFILE" META-INF/com/google/android/super-size 2>/dev/null)"
+  number_valid "$EXPECTED_SUPER_BYTES" || abort 'Missing or invalid super size metadata'
+  capacity="$(blockdev --getsize64 "$SUPER_DEV" 2>/dev/null)"
+  number_valid "$capacity" || abort 'Could not read super capacity'
+  size_le "$EXPECTED_SUPER_BYTES" "$capacity" || abort 'This super image is too large for this device'
+  for required in boot dtbo init_boot modem recovery vbmeta vbmeta_system vbmeta_vendor vendor_boot; do
+    package_has_file "OTA_FILES_HERE/$required.img" || abort "Missing $required.img"
+  done
+  image_list > "$TMPDIR/images"
+  [ -s "$TMPDIR/images" ] || abort 'Package contains no firmware images'
+  while IFS= read -r image; do
+    part="${image##*/}"; part="${part%.img}"
+    is_logical "$part" && continue
+    destinations="$(targets "$part")" || abort "Missing partition for $part"
+    bytes="$(unzip -l "$ZIPFILE" "$image" 2>/dev/null | awk -v name="$image" '$4==name {print $1}')"
+    number_valid "$bytes" || abort "Invalid image size for $part"
+    for target in $destinations; do
+      capacity="$(blockdev --getsize64 "$target" 2>/dev/null)"
+      number_valid "$capacity" || abort "Could not read capacity of $part"
+      size_le "$bytes" "$capacity" || abort "$part.img exceeds partition capacity"
+    done
+  done < "$TMPDIR/images"
+  prepare_helpers
+}
+flash_super() {
+  installer_status 'Streaming super.img'
+  pipe="$TMPDIR/super.pipe"
+  mkfifo "$pipe" || abort 'Could not create super stream'
+  "$ZIP_STREAMER" "$ZIPFILE" super.img > "$pipe" 2> "$TMPDIR/zip.log" &
+  STREAM_PID=$!
+  "$SPARSE_WRITER" "$SUPER_DEV" 0 "$EXPECTED_SUPER_BYTES" "$RECOVERY_UI_FD" < "$pipe" > "$TMPDIR/writer.out" 2> "$TMPDIR/writer.log"
+  writer_status=$?
+  wait "$STREAM_PID"; zip_status=$?; STREAM_PID=""
+  if [ "$writer_status" -ne 0 ] || [ "$zip_status" -ne 0 ]; then
+    cat "$TMPDIR/zip.log" "$TMPDIR/writer.log" >&2
+    abort 'Super stream or ZIP integrity verification failed'
+  fi
+}
+flash_firmware() {
+  while IFS= read -r image; do
+    part="${image##*/}"; part="${part%.img}"
+    is_logical "$part" && continue
+    [ "$part" = abl ] && [ "$KEEP_ABL" = yes ] && { installer_status 'Keeping current ABL'; continue; }
+    destinations="$(targets "$part")" || abort "Missing partition for $part"
+    for target in $destinations; do
+      installer_status "Flashing ${target##*/}"
+      unzip -p "$ZIPFILE" "$image" > "$target" 2>/dev/null || abort "Failed writing ${target##*/}"
+    done
+  done < "$TMPDIR/images"
+}
+set_progress 0.0
+if $AERA_NATIVE_UI; then
+  aera_package 'ColorOS Super Flasher' 'OPPO Find X9 Ultra' 'by koaaN' 'docnok63, Jonas Salo & Daniel'
+  aera_stage 3 0 4 'Checking the package' 'Checking images, partitions and super capacity.'
+else
+  print_box 'ColorOS Super Flasher'
+  print_box 'OPPO Find X9 Ultra'
+fi
+preflight
+confirm install 'Install ColorOS?' 'Writes super, stock recovery, boot and firmware partitions. User data is not formatted.' 'Install' 'Cancel'
+answer=$?
+[ "$answer" -ne 2 ] || abort 'Could not read volume keys'
+if [ "$answer" -ne 0 ]; then
+  aera_complete 'Installation cancelled' 'No partitions were changed.'
+  ui_print 'Installation cancelled. No partitions were changed.'
+  exit 0
+fi
+KEEP_ABL=yes
+confirm abl 'Keep the current ABL?' 'Choose Keep unless you want the stock ABL from this package.' 'Keep' 'Replace'
+answer=$?
+[ "$answer" -ne 2 ] || abort 'Could not read volume keys'
+[ "$answer" -eq 0 ] || KEEP_ABL=no
+show_progress 0.75 120
+aera_stage 12 1 4 'Installing super' 'Streaming directly to super without an extracted temporary image.'
+flash_super
+set_progress 0.75
+aera_stage 78 2 4 'Installing stock firmware' 'Writing boot, recovery and firmware images to their matching partitions.'
+flash_firmware
+aera_stage 97 3 4 'Finishing installation' 'Selecting slot A.'
+"$BOOTCTL" set-active-boot-slot 0 || abort 'Could not select slot A'
+set_progress 1.0
+aera_stage 100 4 4 'Installation complete' 'All writes completed successfully.'
+aera_complete 'ColorOS installed' 'Reboot when ready. Format data manually if your ROM transition requires it.'
+ui_print 'ColorOS installation complete. Slot A selected.'
+ui_print 'User data was not formatted. Reboot when ready.'
+exit 0

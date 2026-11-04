@@ -9,7 +9,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from flasher_builder.backend import Catalog, ROOT
+from flasher_builder.backend import Catalog, ROOT, Worker, BuildError, build, pack_vulnerable_abl
 from flasher_builder.device_layout import coloros, image_folder
 from flasher_builder.native_pipeline import SUPER_PARTS
 from flasher_builder.ota_catalog import targets
@@ -18,6 +18,20 @@ from scripts.materialize_bloat import load_manifest, selected_paths
 REGIONS = ['APC','CN','EU','ID','IN','JP','MX','MY','SG','TH','TW','VN']
 
 class FindX9UltraTests(unittest.TestCase):
+    def test_vulnerable_abl_replaces_only_the_requested_output_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp);(target/'abl.img').write_bytes(b'original extracted ABL')
+            (target/'boot.img').write_bytes(b'keep boot')
+            receipt=pack_vulnerable_abl(Worker(),ROOT,target)
+            self.assertEqual((target/'abl.img').read_bytes(),(ROOT/'bloat/X9U/EU_BLOAT/abl-16.0.6.img').read_bytes())
+            self.assertEqual((target/'boot.img').read_bytes(),b'keep boot')
+            self.assertEqual(receipt['version'],'16.0.6')
+            self.assertEqual(receipt['sha256'],'4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d')
+        with self.assertRaisesRegex(BuildError,'Choose Yes'):
+            build(SimpleNamespace(repo=str(ROOT),device='OPPO Find X9 Ultra',kind='Super Flasher',region='IN',vulnerable_abl=None))
+        with self.assertRaisesRegex(BuildError,'only for X9U'):
+            build(SimpleNamespace(repo=str(ROOT),device='Oneplus 13',kind='SuperHybrid Flasher',region='GLO',vulnerable_abl=True))
+
     def test_supported_regions_templates_sizes_and_catalog_mapping(self):
         catalog=Catalog()
         self.assertEqual(catalog.types('OPPO Find X9 Ultra'),['Super Flasher','Regional Flasher'])
@@ -51,7 +65,8 @@ class FindX9UltraTests(unittest.TestCase):
                 folder = 'EU' if region == 'CN' else region
                 prefix = f'bloat/X9U/{folder}_BLOAT/'
                 selected=selected_paths(manifest,'X9U',kind,region)
-                self.assertEqual(set(selected),{prefix+name+'.img' for name in ('my_company','my_preload')})
+                self.assertEqual(set(selected),{prefix+name+'.img' for name in ('my_company','my_preload','abl-16.0.6')})
+                self.assertEqual(manifest['files'][prefix+'abl-16.0.6.img'],'4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d')
                 if region in expected_preloads:
                     self.assertEqual(manifest['files'][prefix+'my_preload.img'],expected_preloads[region])
         asset=manifest['assets'][manifest['files']['bloat/X9U/CN_BLOAT/my_preload.img']]

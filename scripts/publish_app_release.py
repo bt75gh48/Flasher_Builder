@@ -87,6 +87,8 @@ def main():
             raise ValueError('Native package verification failed: ' + platform)
         if report.get('documentation_in_app') is not True:
             raise ValueError('Packaged documentation verification failed: ' + platform)
+        if not all(report.get(k) is True for k in ('x9u_hybrid','x9u_abl_choice_required','shared_vulnerable_abl')):
+            raise ValueError('Packaged X9U hybrid/ABL verification failed: ' + platform)
         if not all(report.get(k) is True for k in ('regional_super_sizes','multipart_bloat','regional_bloat','reconstructed_na')):
             raise ValueError('Packaged regional-size/multipart verification failed: ' + platform)
         if report.get('app_version') != args.tag.removeprefix('v'):
@@ -102,11 +104,12 @@ def main():
     checksums = directory / 'SHA256SUMS'
     checksums.write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files), encoding='utf-8')
     files.append(checksums)
-    notes = '''Added OnePlus 15 NA firmware versions from the normal OTA API alongside the dedicated NA feed.
+    notes = '''- Added SuperHybrid support to OPPO Find X9 Ultra Super Flasher packages, with fastboot and recovery installation in the same ZIP. Recovery supports AERA touch prompts and volume keys.
+- Added step 4 for X9 Ultra: users must choose Yes or No to packing vulnerable ABL before building. Yes packs ABL 16.0.6 as abl.img; No keeps the OTA's ABL.
+- ABL 16.0.6 now downloads with bloat for every X9 Ultra region, using one shared verified GitHub attachment.
+- Fixed recovery size checks for large super partitions and added installer checks before writing images.
 
-OnePlus 13 NA continues to use only the dedicated NA feed, as before.
-
-Available for Linux and Windows. Extract the full platform archive and run FlasherBuilder (Linux) or FlasherBuilder.exe (Windows).
+Linux and Windows packages include validation receipts and SHA256SUMS. Extract the entire platform archive and run FlasherBuilder (Linux) or FlasherBuilder.exe (Windows).
 '''
     release = find_release(args.tag)
     if release is None or not release.get('draft'): raise ValueError('Expected an unpublished draft release.')
