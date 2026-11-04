@@ -40,6 +40,7 @@ else:
 
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent.parent
 GIB = 1024 ** 3
+X9U_ABL_SHA256 = '4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d'
 
 
 class BuildError(Exception):
@@ -483,7 +484,7 @@ def pack_vulnerable_abl(worker, repo, image_directory, region='EU', bloat_direct
     from scripts.materialize_bloat import bloat_folder
     folder = bloat_folder('X9U', 'Super Flasher', region)
     source = Path(bloat_directory or Path(repo)/'bloat') / 'X9U' / folder / 'abl-16.0.6.img'
-    expected = '4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d'
+    expected = X9U_ABL_SHA256
     if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
         raise BuildError('The X9U ABL 16.0.6 bloat image is missing or has an incorrect checksum. Complete Download bloat in step 2.')
     worker.check()

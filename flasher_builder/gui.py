@@ -1026,6 +1026,9 @@ class App(QMainWindow):
         values = self.values()
         x9u = values['device'] == 'OPPO Find X9 Ultra'
         self.abl_card.setVisible(x9u)
+        for panel in (self.configure_card, self.bloat_card, self.ota_card):
+            panel.layout().setContentsMargins(18, 8 if x9u else 12, 18, 8 if x9u else 12)
+            panel.layout().setSpacing(6 if x9u else 8)
         self.workflow_hint.setText('CONFIGURE → BLOAT FILES → OTA → ABL → BUILD' if x9u else 'CONFIGURE → BLOAT FILES → OTA → BUILD')
         if x9u:
             choice = values['vulnerable_abl']

@@ -1,5 +1,6 @@
 """Regional super sizes, ColorOS layouts and host flashers without hardware."""
 import os
+import hashlib
 import queue
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from flasher_builder.backend import Catalog, ROOT, Worker, BuildError, build, pack_vulnerable_abl
 from flasher_builder.device_layout import coloros, image_folder
 from flasher_builder.native_pipeline import SUPER_PARTS
@@ -22,11 +24,20 @@ class FindX9UltraTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp);(target/'abl.img').write_bytes(b'original extracted ABL')
             (target/'boot.img').write_bytes(b'keep boot')
-            receipt=pack_vulnerable_abl(Worker(),ROOT,target)
-            self.assertEqual((target/'abl.img').read_bytes(),(ROOT/'bloat/X9U/EU_BLOAT/abl-16.0.6.img').read_bytes())
+            raw=b'Verified ABL test fixture\n'*64
+            checksum=hashlib.sha256(raw).hexdigest()
+            source=target/'selected-bloat/X9U/EU_BLOAT/abl-16.0.6.img'
+            source.parent.mkdir(parents=True);source.write_bytes(raw)
+            with patch('flasher_builder.backend.X9U_ABL_SHA256',checksum):
+                receipt=pack_vulnerable_abl(Worker(),ROOT,target,bloat_directory=target/'selected-bloat')
+                self.assertEqual((target/'abl.img').read_bytes(),raw)
+                source.write_bytes(b'corrupt ABL fixture')
+                with self.assertRaisesRegex(BuildError,'incorrect checksum'):
+                    pack_vulnerable_abl(Worker(),ROOT,target,bloat_directory=target/'selected-bloat')
+                self.assertEqual((target/'abl.img').read_bytes(),raw)
             self.assertEqual((target/'boot.img').read_bytes(),b'keep boot')
             self.assertEqual(receipt['version'],'16.0.6')
-            self.assertEqual(receipt['sha256'],'4ad7f1db0c92f0a358e28bf18170a20533011299827d8d9a25cffd2218f1415d')
+            self.assertEqual(receipt['sha256'],checksum)
         with self.assertRaisesRegex(BuildError,'Choose Yes'):
             build(SimpleNamespace(repo=str(ROOT),device='OPPO Find X9 Ultra',kind='Super Flasher',region='IN',vulnerable_abl=None))
         with self.assertRaisesRegex(BuildError,'only for X9U'):
