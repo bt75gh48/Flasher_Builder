@@ -38,6 +38,11 @@ on:
         description: "Direct FULL OTA.zip URL (optional, overrides Catalog OTA Version)"
         type: string
         required: false
+      bloat_static_odm:
+        description: "Static Bloat ODM (0: dynamic patch-matched, 1: static legacy bloat)"
+        type: string
+        required: false
+        default: "0"
       upload_to:
         description: "Upload To"
         type: choice
@@ -62,6 +67,7 @@ permissions:
 env:
   OUT_DIR: out
   ARTIFACT_RETENTION_DAYS: 14
+  BLOAT_STATIC_ODM: ${{ inputs.bloat_static_odm || '0' }}
 
 jobs:
   build:
@@ -97,6 +103,7 @@ jobs:
           INPUT_REGION: ${{ inputs.region }}
           INPUT_OTA_URL: ${{ inputs.ota_url }}
           INPUT_OTA_VER: ${{ inputs.ota_version }}
+          INPUT_BLOAT_STATIC_ODM: ${{ inputs.bloat_static_odm || '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -156,7 +163,7 @@ jobs:
           )
 
           # Fail-fast before downloading the 6+ GB OTA if Ace 6T CN donor ODM does not exist for this patch
-          if ota_catalog.needs_matched_odm(device, kind, region):
+          if ota_catalog.needs_matched_odm(device, kind, region) and os.environ.get("INPUT_BLOAT_STATIC_ODM", "0") != "1":
               backend.plan_matched_odm(worker, args)
 
           version, payload_size, metadata = backend.prepare_ota(worker, args, "ota", ota_dest)
@@ -268,14 +275,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BLOAT_CACHE_DIR: ${{ runner.temp }}/flasher-bloat-cache
-          BLOAT_STATIC_ODM: "0"
+          BLOAT_STATIC_ODM: ${{ inputs.bloat_static_odm || '0' }}
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/stage_files.sh
 
       - name: Stream patch-matched ColorOS ODM (Ace 6T OOS)
-        if: ${{ inputs.device == 'Oneplus Ace 6T' && inputs.flasher_type == 'Super Flasher' && (inputs.region == 'IN' || inputs.region == 'GLO') }}
+        if: ${{ inputs.device == 'Oneplus Ace 6T' && inputs.flasher_type == 'Super Flasher' && (inputs.region == 'IN' || inputs.region == 'GLO') && inputs.bloat_static_odm != '1' }}
         shell: bash
         run: |
           set -euo pipefail
