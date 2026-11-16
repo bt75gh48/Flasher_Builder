@@ -1,0 +1,599 @@
+name: Build Tool-Macan (Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Device"
+        type: choice
+        required: true
+        options:
+          - Oneplus 15R
+          - Oneplus Ace 6T
+        default: Oneplus 15R
+      flasher_type:
+        description: "Flasher type"
+        type: choice
+        required: true
+        options:
+          - Super Flasher
+          - Regional Flasher
+        default: Super Flasher
+      region:
+        description: "Region"
+        type: choice
+        required: true
+        options:
+          - GLO
+          - EU
+          - IN
+          - CN
+        default: GLO
+      ota_version:
+        description: "Catalog OTA Version (e.g. 'latest', '16.0.10.500', or full version; used if ota_url is empty)"
+        type: string
+        required: false
+        default: "latest"
+      ota_url:
+        description: "Direct FULL OTA.zip URL (optional, overrides Catalog OTA Version)"
+        type: string
+        required: false
+      upload_to:
+        description: "Upload To"
+        type: choice
+        required: true
+        options:
+          - Gofile
+          - Artifact Only
+        default: Gofile
+      gofile_api_key:
+        description: "Gofile API Key (optional, falls back to GOFILE_API_KEY secret)"
+        type: string
+        required: false
+      notify_telegram:
+        description: "Notify Telegram"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  OUT_DIR: out
+  ARTIFACT_RETENTION_DAYS: 14
+
+jobs:
+  build:
+    name: Build • ${{ inputs.device }} • ${{ inputs.flasher_type }} • ${{ inputs.region }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Make scripts executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          # CRLF -> LF
+          git ls-files '*.sh' | while read -r f; do sed -i 's/\r$//' "$f"; done
+
+          # Make executable
+          find build_scripts   -type f -name "*.sh" -exec chmod +x {} +
+          find flasher_scripts -type f -name "*.sh" -exec chmod +x {} +
+
+          # Binaries (if present)
+          [ -f lpmake/lpmake ] && chmod +x lpmake/lpmake || true
+          [ -f otaripper/otaripper ] && chmod +x otaripper/otaripper || true
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Prepare, Download & Validate OTA
+        env:
+          INPUT_DEVICE: ${{ inputs.device }}
+          INPUT_FLASHER: ${{ inputs.flasher_type }}
+          INPUT_REGION: ${{ inputs.region }}
+          INPUT_OTA_URL: ${{ inputs.ota_url }}
+          INPUT_OTA_VER: ${{ inputs.ota_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p download "${OUT_DIR}"
+
+          python3 -c '
+          import os, re, shutil, sys
+          from argparse import Namespace
+          from pathlib import Path
+          from flasher_builder import backend, ota_catalog
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          device = os.environ["INPUT_DEVICE"]
+          kind = os.environ["INPUT_FLASHER"]
+          region = os.environ["INPUT_REGION"]
+          raw_url = backend.clean_source(os.environ.get("INPUT_OTA_URL", ""))
+          ver_query = os.environ.get("INPUT_OTA_VER", "").strip()
+
+          download_dir = repo / "download"
+          download_dir.mkdir(parents=True, exist_ok=True)
+          ota_dest = download_dir / "OTA.zip"
+          worker = backend.Worker()
+
+          catalog_id = ""
+          if not raw_url:
+              if not ver_query:
+                  ver_query = "latest"
+              target_dev, target_reg = ota_catalog.targets(device, kind, region)["ota"]
+              data = ota_catalog.load_catalog(repo / ".ota-catalog", na=ota_catalog.uses_na_api(target_dev, target_reg))
+              releases = ota_catalog.releases_for(data, target_dev, target_reg)
+              if not releases:
+                  sys.exit(f"No OTA releases found in catalog for {target_dev} ({target_reg})")
+              if ver_query.lower() == "latest":
+                  chosen = releases[0]
+              else:
+                  matches = [
+                      r for r in releases
+                      if ver_query.lower() in (r["id"].lower(), r["version"].lower(), str(r.get("ota_version", "")).lower())
+                      or ver_query in re.findall(r"\d+(?:\.\d+){1,4}", r["version"])
+                  ]
+                  if not matches:
+                      avail = ", ".join(r["version"] for r in releases[:10])
+                      sys.exit(f"Could not find catalog version matching {ver_query!r}. Available: {avail}")
+                  chosen = matches[0]
+              catalog_id = chosen["id"]
+              c_dev, c_reg, c_ver, c_patch = chosen["device"], chosen["region"], chosen["version"], chosen.get("security_patch")
+              print(f"Resolved catalog release: {c_dev} / {c_reg} / {c_ver} (patch: {c_patch})")
+
+          args = Namespace(
+              repo=str(repo),
+              device=device,
+              kind=kind,
+              region=region,
+              ota=raw_url,
+              ota_catalog_id=catalog_id,
+              download_ota=True,
+          )
+
+          # Fail-fast before downloading the 6+ GB OTA if Ace 6T CN donor ODM does not exist for this patch
+          if ota_catalog.needs_matched_odm(device, kind, region):
+              backend.plan_matched_odm(worker, args)
+
+          version, payload_size, metadata = backend.prepare_ota(worker, args, "ota", ota_dest)
+          free = shutil.disk_usage(download_dir).free
+          required = max(2 * backend.GIB, payload_size * 3)
+          print(f"Verified FULL OTA version: {version} • payload: {payload_size / backend.GIB:.2f} GiB • free space: {free / backend.GIB:.1f} GiB")
+          if free < required:
+              sys.exit(f"Not enough disk space: {free / backend.GIB:.1f} GiB free, need at least {required / backend.GIB:.1f} GiB")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"OTA_PATH={ota_dest}\n")
+              env_file.write(f"OTA_DIR={download_dir}\n")
+              env_file.write(f"OTA_VERSION={version}\n")
+              env_file.write(f"OTA_CATALOG_ID={catalog_id}\n")
+          '
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Map device → pick builder (LIST ONLY)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dev_disp="${{ inputs.device }}"
+          ftype="${{ inputs.flasher_type }}"
+          region="${{ inputs.region }}"
+
+          # ----------------------------
+          # Device display → internal ID
+          # ----------------------------
+          declare -A DEV_MAP=(
+            ["Oneplus 15R"]="15R"
+            ["Oneplus Ace 6T"]="Ace6T"
+          )
+          
+          dev="${DEV_MAP[$dev_disp]}"
+          [[ -z "$dev" ]] && { echo "Unknown device: $dev_disp"; exit 1; }
+          
+          # ----------------------------
+          # Super Size:  CN  ||  NON-CN
+          # ----------------------------
+          if [[ "$ftype" == "Super Flasher" || "$ftype" == "SuperHybrid Flasher" ]]; then
+            declare -A SUPER_SIZE_TABLE=(
+              ["Ace6T"]="16886267904 16886267904"
+              ["15R"]="16231956480 16231956480"
+            )
+
+            entry="${SUPER_SIZE_TABLE[$dev]}"
+            [[ -z "$entry" ]] && {
+              echo "ERROR: SUPER_SIZE not defined for device=$dev"
+              exit 1
+            }
+
+            read -r CN_SIZE NON_CN_SIZE <<< "$entry"
+
+            if [[ "$region" == "CN" ]]; then
+              SUPER_SIZE="$CN_SIZE"
+            else
+              SUPER_SIZE="$NON_CN_SIZE"
+            fi
+
+            echo "SUPER_SIZE=$SUPER_SIZE" >> "$GITHUB_ENV"
+            
+            echo "Using SUPER_SIZE: $SUPER_SIZE"
+          fi
+
+          # ------------------------------------------------
+          # LIST-ONLY BUILDER TABLE (NO WILDCARDS)
+          # Key format: Flasher|Device|Region
+          # ------------------------------------------------
+          declare -A BUILDER_MAP
+
+          # ===== Super Flasher =====
+          BUILDER_MAP["Super Flasher|15R|EU"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|15R|GLO"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|15R|IN"]="BUILD_SUPER"
+          
+          BUILDER_MAP["Super Flasher|Ace6T|CN"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|Ace6T|IN"]="BUILD_SUPER"
+          BUILDER_MAP["Super Flasher|Ace6T|GLO"]="BUILD_SUPER"
+
+          # ===== Regional Flasher =====
+          BUILDER_MAP["Regional Flasher|15R|IN"]="BUILD_REGIONAL"
+          BUILDER_MAP["Regional Flasher|15R|GLO"]="BUILD_REGIONAL"
+          BUILDER_MAP["Regional Flasher|15R|EU"]="BUILD_REGIONAL"
+
+          # ------------------------------------------------
+          key="$ftype|$dev|$region"
+          base_name="${BUILDER_MAP[$key]}"
+
+          if [[ -z "$base_name" ]]; then
+            echo "❌ Unsupported combination:"
+            echo "   Device:  $dev_disp"
+            echo "   Flasher: $ftype"
+            echo "   Region:  $region"
+            exit 1
+          fi
+
+          echo "DEV=$dev" >> "$GITHUB_ENV"
+          echo "FTYPE=$ftype" >> "$GITHUB_ENV"
+          echo "REGION=$region" >> "$GITHUB_ENV"
+          echo "BUILDER_SH=${base_name}.sh" >> "$GITHUB_ENV"
+
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Stage files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BLOAT_CACHE_DIR: ${{ runner.temp }}/flasher-bloat-cache
+          BLOAT_STATIC_ODM: "0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/stage_files.sh
+
+      - name: Stream patch-matched ColorOS ODM (Ace 6T OOS)
+        if: ${{ inputs.device == 'Oneplus Ace 6T' && inputs.flasher_type == 'Super Flasher' && (inputs.region == 'IN' || inputs.region == 'GLO') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import os, shutil, sys
+          from argparse import Namespace
+          from pathlib import Path
+          from flasher_builder import backend
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          ota_path = Path(os.environ["OTA_PATH"]).resolve()
+          ota_dir = Path(os.environ["OTA_DIR"]).resolve()
+          work_dir = Path(os.environ["WORK_DIR"]).resolve()
+          region = os.environ["REGION"]
+
+          worker = backend.Worker()
+          args = Namespace(repo=str(repo), device="Oneplus Ace 6T", kind="Super Flasher", region=region, ota_catalog_id=os.environ.get("OTA_CATALOG_ID", ""))
+          plan = backend.plan_matched_odm(worker, args)
+          _, _, metadata = backend.validate_ota(ota_path)
+          odm, receipt = backend.prepare_matched_odm(worker, args, metadata, ota_dir, plan)
+          dest = work_dir / "Super" / "odm.img"
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(odm, dest)
+          shutil.rmtree(ota_dir / "matched-odm", ignore_errors=True)
+          print("Staged matched ODM:", receipt)
+          '
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Pre-stage flasher into OTA folder
+        if: ${{ inputs.flasher_type == 'RegionalHybrid Flasher' || inputs.flasher_type == 'SuperHybrid Flasher' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$WORK_DIR"
+          [ -d "$src" ] || { echo "WORK_DIR not found: $src"; exit 1; }
+          dst="$OTA_DIR/$(basename "$src")"
+          mkdir -p "$dst"
+          rsync -a --info=progress2 "$src/" "$dst/"
+          [ -f "$OUT_DIR/otaripper" ] && cp -f "$OUT_DIR/otaripper" "$OTA_DIR/"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Run builder
+        shell: bash
+        working-directory: ${{ env.OTA_DIR }}
+        run: |
+          set -euo pipefail
+          echo "CWD is $(pwd)"
+          echo "Calling builder: \"$GITHUB_WORKSPACE/$OUT_DIR/$BUILDER_SH\" \"$OTA_PATH\""
+          bash "$GITHUB_WORKSPACE/$OUT_DIR/$BUILDER_SH" "$OTA_PATH"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Package final output
+        shell: bash
+        run: |
+          set -euo pipefail
+          ota_dir="$OTA_DIR"
+          dev_disp="${{ inputs.device }}"
+
+          expected_name="$FTYPE"
+          [[ "$REGION" == "CN" ]] && expected_name="$FTYPE CN"
+
+          echo "Expected output folder: $expected_name"
+
+          result_dir="$ota_dir/$expected_name"
+
+          if [ ! -d "$result_dir" ]; then
+            echo "ERROR: Expected output folder not found:"
+            echo "  $result_dir"
+            echo
+            echo "Folders in OTA_DIR:"
+            ls -la "$ota_dir" || true
+            exit 1
+          fi
+
+          # Verify output images (matching Python backend checks)
+          if [[ "$REGION" == "CN" ]]; then
+            boot_dir="$result_dir/COS_FILES_HERE"
+          else
+            boot_dir="$result_dir/OOS_FILES_HERE"
+          fi
+          if [ ! -f "$boot_dir/boot.img" ]; then
+            echo "ERROR: Build output has no boot.img at $boot_dir/boot.img. The OTA may be incomplete or incompatible."
+            exit 1
+          fi
+          if [[ "$FTYPE" == *Super* ]] && [ ! -f "$result_dir/super.img" ]; then
+            echo "ERROR: Build output has no super.img at $result_dir/super.img."
+            exit 1
+          fi
+
+          zip_root="$GITHUB_WORKSPACE/$OUT_DIR"
+          mkdir -p "$zip_root"
+
+          ftype_name="$FTYPE"
+          region_code="$REGION"
+          ver="${OTA_VERSION:-UNKNOWN}"
+
+            case "$region_code" in
+              CN)  region_disp="COS" ;;
+              GLO) region_disp="GLO" ;;
+              EU)  region_disp="EU" ;;
+              IN)  region_disp="IN" ;;
+              NA)  region_disp="NA" ;;
+              *)   region_disp="$region_code" ;;
+            esac
+            
+            case "$dev_disp" in
+              "Oneplus 15R")    device_model="15R" ;;
+              "Oneplus Ace 6T") device_model="A6T" ;;
+              *)   device_model="$dev_disp" ;;
+            esac
+
+            case "$DEV" in
+              "Ace6T")
+                if [[ "$REGION" == "CN" ]]; then
+                  os_tag="COS"
+                else
+                  os_tag="${region_disp} OOS+COS ODM"
+                fi
+                artifact_base="${ftype_name} A6T ${os_tag} ${ver}"
+                ;;
+              *)
+                artifact_base="${ftype_name} ${device_model} ${region_disp} ${ver}"
+                ;;
+            esac
+
+          zip_path="$zip_root/${artifact_base}.zip"
+          rm -f "$zip_path"
+
+          echo "================ Packaging info ================"
+          echo "Source folder : $result_dir"
+          echo "Artifact name : $artifact_base"
+          echo "ZIP output    : $zip_path"
+          echo "================================================"
+
+          cd "$result_dir"
+          
+          echo "================ Folder tree (max depth 8) ================"
+          tree -L 8 -h . || echo "tree not available"
+          echo "Total size:"
+          du -sh .
+          echo "==========================================================="
+          
+
+          if command -v 7zz >/dev/null 2>&1; then
+            seven=7zz
+          elif command -v 7z >/dev/null 2>&1; then
+            seven=7z
+          else
+            seven=""
+          fi
+
+          if [ -n "$seven" ]; then
+            "$seven" a -tzip -mm=Deflate -mx=3 -mfb=32 -mmt=8 -bso0 -bsp0 "$zip_path" .
+          else
+            zip -qr -3 "$zip_path" .
+          fi
+
+          [ -f "$zip_path" ] || { echo "Packaging failed: ZIP not created at $zip_path"; exit 1; }
+
+          sha256="$(sha256sum "$zip_path" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256" "$(basename "$zip_path")" > "${zip_path}.sha256"
+          echo "Package SHA-256: $sha256"
+
+          {
+            echo "ARTIFACT_NAME=$artifact_base"
+            echo "ZIP_FILE=$zip_path"
+            echo "ZIP_SHA256=$sha256"
+          } >> "$GITHUB_ENV"
+          
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Upload artifact
+        if: ${{ inputs.upload_to == 'Artifact Only' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ZIP_FILE }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Upload to Gofile
+        if: ${{ inputs.upload_to == 'Gofile' }}
+        env:
+          GOFILE_API_KEY_INPUT: ${{ inputs.gofile_api_key }}
+          GOFILE_API_KEY_SECRET: ${{ secrets.GOFILE_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_key="${GOFILE_API_KEY_INPUT:-${GOFILE_API_KEY_SECRET:-}}"
+          [ -n "$api_key" ] || { echo "Missing Gofile API key (provide gofile_api_key input or GOFILE_API_KEY secret)"; exit 1; }
+          echo "::add-mask::$api_key"
+
+          zip_path="$ZIP_FILE"
+          [ -f "$zip_path" ] || { echo "ZIP not found: $zip_path"; exit 1; }
+
+          file_bytes="$(wc -c < "$zip_path" | tr -d ' ')"
+          file_gb="$(python3 -c "print(f'{$file_bytes / (1024**3):.2f}')")"
+          echo "📦 File to upload: $(basename "$zip_path") (${file_gb} GB / ${file_bytes} bytes)"
+
+          server="upload.gofile.io"
+          srv_json="$(curl -fsS --max-time 15 "https://api.gofile.io/servers" 2>/dev/null || true)"
+          if [ -n "$srv_json" ]; then
+            best_srv="$(python3 -c 'import sys,json
+          try:
+            d=json.loads(sys.stdin.read())
+            s=d.get("data",{}).get("servers",[])
+            if s and s[0].get("name"):
+              print(s[0]["name"] + ".gofile.io")
+          except Exception:
+            pass' <<< "$srv_json")"
+            [ -n "$best_srv" ] && server="$best_srv"
+          fi
+
+          echo "🚀 Uploading $(basename "$zip_path") to Gofile via https://${server}/uploadfile ..."
+          resp_file="$RUNNER_TEMP/gofile_resp.json"
+
+          start_time="$(python3 -c 'import time; print(time.time())')"
+          curl -fL --progress-meter --retry 3 --retry-delay 5 \
+            -H "Authorization: Bearer ${api_key}" \
+            -F "file=@${zip_path}" \
+            "https://${server}/uploadfile" -o "$resp_file"
+
+          python3 -c 'import sys, time
+          total_b = int(sys.argv[1])
+          st = float(sys.argv[2])
+          dur = max(0.001, time.time() - st)
+          rate = (total_b / dur) / (1024 * 1024)
+          print(f"✅ Gofile upload completed in {dur:.1f}s (Average rate: {rate:.2f} MB/s)")' "$file_bytes" "$start_time"
+
+          download_page="$(python3 -c 'import sys,json
+          d=json.load(open(sys.argv[1], encoding="utf-8"))
+          if d.get("status") != "ok":
+            sys.exit("Gofile upload error: " + str(d))
+          url=d.get("data",{}).get("downloadPage","")
+          if not url:
+            sys.exit("No downloadPage in Gofile response: " + str(d))
+          print(url)' "$resp_file")"
+
+          echo "Gofile Download URL: $download_page"
+          echo "GOFILE_DOWNLOAD_URL=$download_page" >> "$GITHUB_ENV"
+
+      # ===============================================================================
+      # ===============================================================================
+
+      - name: Telegram notify
+        if: ${{ inputs.upload_to == 'Gofile' }}
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || '1593626807' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C.UTF-8
+          export LANG=C.UTF-8
+
+          device_disp="${{ inputs.device }}"
+          region="$REGION"
+          type="$FTYPE"
+          version="${OTA_VERSION:-UNKNOWN}"
+          artifact="$ARTIFACT_NAME"
+          zip_link="$GOFILE_DOWNLOAD_URL"
+
+          # -----------------------------
+          # Telegram Chat ID
+          # -----------------------------
+          chat_id="${TELEGRAM_CHAT_ID:-1593626807}"
+          chat_name="Telegram (${chat_id})"
+
+          # -----------------------------
+          # Always log what would happen
+          # -----------------------------
+          echo "================ Telegram notify (dry info) ================"
+          echo "Device:   $device_disp"
+          echo "Region:   $region"
+          echo "Type:     $type"
+          echo "Version:  $version"
+          echo "Artifact: $artifact"
+          echo "Target:   $chat_name ($chat_id)"
+          echo "Gofile:   $zip_link"
+          echo "notify_telegram input: ${{ inputs.notify_telegram }}"
+          echo "============================================================"
+
+          # -----------------------------
+          # Send only if enabled
+          # -----------------------------
+          if [[ "${{ inputs.notify_telegram }}" != "true" ]]; then
+            echo "ℹ️ Telegram: notify_telegram=false -> not sending (log-only)."
+            exit 0
+          fi
+
+          payload_path="$RUNNER_TEMP/tg_payload.json"
+          CHAT_ID="$chat_id" DEVICE="$device_disp" REGION="$region" TYPE="$type" VERSION="$version" ARTIFACT="$artifact" ZIP="$zip_link" OUT="$payload_path" \
+          python3 -c 'import os,json,html; chat_id=int(os.environ["CHAT_ID"]); device=html.escape(os.environ["DEVICE"]); region=html.escape(os.environ["REGION"]); typ=html.escape(os.environ["TYPE"]); version=html.escape(os.environ["VERSION"]); artifact=html.escape(os.environ["ARTIFACT"]); zip_url=os.environ["ZIP"]; text="🚀 <b>New Build Released</b>\n"+f"📱 <b>Device</b>  <code>{device}</code>\n"+f"🌍 <b>Region</b>  <code>{region}</code>\n"+f"🧩 <b>Type</b>    <code>{typ}</code>\n"+f"🏷️ <b>Version</b> <code>{version}</code>\n\n"+"📦 <b>Package</b>\n"+f"<code>{artifact}</code>\n\n"+"⬇️ Choose a download below."; keyboard=[[{"text":"⬇️ Download (Gofile)","url":zip_url}]]; p={"chat_id":chat_id,"text":text,"parse_mode":"HTML","disable_web_page_preview":True,"reply_markup":{"inline_keyboard":keyboard}}; open(os.environ["OUT"],"w",encoding="utf-8").write(json.dumps(p, ensure_ascii=False,separators=(",",":")))'
+
+          test -s "$payload_path" || { echo "Telegram payload not created"; exit 1; }
+
+          curl -fsS -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+               -H "Content-Type: application/json; charset=utf-8" \
+               --data-binary "@${payload_path}"
+
+          echo "✅ Telegram: sent to $chat_name ($chat_id)."
+
+
+
+
+      - name: Cleanup runner workspace
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Cleaning workspace: $GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo "✅ Workspace cleaned."

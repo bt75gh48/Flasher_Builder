@@ -124,7 +124,8 @@ root="$GITHUB_WORKSPACE"
 # Fetch only this build's verified private-release assets. A source checkout
 # without a manifest keeps the original local-file/URL behavior.
 if [[ -f "$root/bloat/assets-manifest.json" ]]; then
-  bloat_args=(--root "$root" --cache "${BLOAT_CACHE_DIR:-$root/.bloat-cache}" --device "$dev" --kind "$ftype" --region "$region" --static-odm)
+  bloat_args=(--root "$root" --cache "${BLOAT_CACHE_DIR:-$root/.bloat-cache}" --device "$dev" --kind "$ftype" --region "$region")
+  [[ "${BLOAT_STATIC_ODM:-1}" == "1" ]] && bloat_args+=(--static-odm)
   [[ -n "${BLOAT_SOURCE_DIR:-}" ]] && bloat_args+=(--source "$BLOAT_SOURCE_DIR")
   [[ "${BLOAT_REQUIRE_LOCAL:-0}" == "1" ]] && bloat_args+=(--local-only)
   python3 "$root/scripts/materialize_bloat.py" "${bloat_args[@]}"
