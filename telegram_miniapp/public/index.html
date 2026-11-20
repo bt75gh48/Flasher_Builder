@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Oneplus Flasher Builder (Macan)</title>
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            tg: {
+              bg: 'var(--tg-theme-bg-color, #0f172a)',
+              secondary: 'var(--tg-theme-secondary-bg-color, #1e293b)',
+              text: 'var(--tg-theme-text-color, #f8fafc)',
+              hint: 'var(--tg-theme-hint-color, #94a3b8)',
+              link: 'var(--tg-theme-link-color, #38bdf8)',
+              button: 'var(--tg-theme-button-color, #2563eb)',
+              buttonText: 'var(--tg-theme-button-text-color, #ffffff)'
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans select-none pb-20">
+
+  <!-- Header -->
+  <header class="bg-slate-900/80 backdrop-blur border-b border-slate-800 sticky top-0 z-40 px-4 py-3">
+    <div class="max-w-lg mx-auto w-full">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
+            <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <div>
+            <h1 class="text-sm font-bold text-white tracking-wide">Flasher Builder</h1>
+            <p class="text-[11px] text-slate-400">Macan • MacanC</p>
+          </div>
+        </div>
+        <div id="user-badge" class="flex items-center space-x-1.5 px-2.5 py-1 rounded-full bg-slate-800/80 border border-slate-700/60 text-xs">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span id="tg-username" class="text-slate-300 font-medium">Guest</span>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div id="nav-tabs-container" class="flex mt-3 p-1 bg-slate-950/60 rounded-xl border border-slate-800/80 text-xs font-medium">
+        <button type="button" id="tab-builder-btn" class="flex-1 py-1.5 px-3 rounded-lg bg-blue-600 text-white shadow font-semibold transition-all flex items-center justify-center space-x-1">
+          <span>⚡ New Build</span>
+        </button>
+        <button type="button" id="tab-runs-btn" class="hidden flex-1 py-1.5 px-3 rounded-lg text-slate-400 hover:text-slate-200 transition-all items-center justify-center space-x-1">
+          <span>📜 Action Runs</span>
+          <span id="runs-badge" class="hidden px-1.5 py-0.5 text-[10px] rounded-full bg-blue-500/20 text-blue-300 font-bold">0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="flex-1 p-4 max-w-lg mx-auto w-full">
+
+    <!-- TAB 1: BUILD FORM -->
+    <section id="tab-builder" class="space-y-4">
+
+      <!-- Device Card -->
+      <div class="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl">
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center justify-between">
+          <span>1. Select Device</span>
+          <span class="text-[11px] text-slate-500 font-normal">Target Model</span>
+        </label>
+        <div class="grid grid-cols-2 gap-2.5">
+          <button type="button" data-device="Oneplus 15R" class="device-btn active-choice p-3 rounded-xl border text-left flex flex-col justify-between transition-all">
+            <div class="flex items-center justify-between">
+              <span class="text-base font-bold text-white">15R</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono">15R</span>
+            </div>
+            <span class="text-xs text-slate-400 mt-2">OnePlus 15R</span>
+          </button>
+
+          <button type="button" data-device="Oneplus Ace 6T" class="device-btn inactive-choice p-3 rounded-xl border text-left flex flex-col justify-between transition-all">
+            <div class="flex items-center justify-between">
+              <span class="text-base font-bold text-white">Ace 6T</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/20 text-purple-400 border border-purple-500/30 font-mono">A6T</span>
+            </div>
+            <span class="text-xs text-slate-400 mt-2">OnePlus Ace 6T</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Flasher Type Card -->
+      <div class="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl">
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center justify-between">
+          <span>2. Flasher Type</span>
+          <span class="text-[11px] text-slate-500 font-normal">Full Super image</span>
+        </label>
+        <div class="grid grid-cols-2 gap-2.5">
+          <button type="button" data-flasher="Super Flasher" class="flasher-btn active-choice p-3 rounded-xl border text-left flex flex-col justify-between transition-all">
+            <span class="text-sm font-bold text-white flex items-center">
+              Super Flasher
+            </span>
+            <span class="text-[11px] text-slate-400 mt-1.5">Includes full super.img</span>
+          </button>
+
+          <button type="button" data-flasher="Regional Flasher" id="btn-regional-flasher" class="flasher-btn inactive-choice p-3 rounded-xl border text-left flex flex-col justify-between transition-all">
+            <span class="text-sm font-bold text-white flex items-center">
+              Regional Flasher
+            </span>
+            <span class="text-[11px] text-slate-400 mt-1.5">Partition-only repacking</span>
+          </button>
+        </div>
+        <p id="ace6t-flasher-note" class="hidden mt-2 text-[11px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 p-2 rounded-lg">
+          ⚠️ Ace 6T currently supports <b>Super Flasher</b> only (with dynamic patch-matched ODM).
+        </p>
+      </div>
+
+      <!-- Region Card -->
+      <div class="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl">
+        <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2.5">
+          3. Region / Firmware Channel
+        </label>
+        <div class="grid grid-cols-4 gap-2">
+          <button type="button" data-region="GLO" class="region-btn active-choice py-2.5 px-2 rounded-xl border text-center transition-all">
+            <span class="block text-sm font-bold text-white">GLO</span>
+            <span class="block text-[10px] text-slate-400 mt-0.5">Global</span>
+          </button>
+          <button type="button" data-region="EU" id="btn-region-eu" class="region-btn inactive-choice py-2.5 px-2 rounded-xl border text-center transition-all">
+            <span class="block text-sm font-bold text-white">EU</span>
+            <span class="block text-[10px] text-slate-400 mt-0.5">Europe</span>
+          </button>
+          <button type="button" data-region="IN" class="region-btn inactive-choice py-2.5 px-2 rounded-xl border text-center transition-all">
+            <span class="block text-sm font-bold text-white">IN</span>
+            <span class="block text-[10px] text-slate-400 mt-0.5">India</span>
+          </button>
+          <button type="button" data-region="CN" id="btn-region-cn" class="region-btn inactive-choice py-2.5 px-2 rounded-xl border text-center transition-all">
+            <span class="block text-sm font-bold text-white">CN</span>
+            <span class="block text-[10px] text-slate-400 mt-0.5">China</span>
+          </button>
+        </div>
+        <p id="region-warning" class="hidden mt-2 text-[11px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 p-2 rounded-lg"></p>
+      </div>
+
+      <!-- OTA Source Card (Catalog & Custom URL) -->
+      <div class="bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 shadow-xl space-y-3">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+            4. OTA Firmware Source
+          </label>
+          <div class="flex items-center space-x-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[11px]">
+            <button type="button" id="tab-source-catalog" class="px-2.5 py-0.5 rounded-md bg-blue-600 text-white font-medium transition-all">Catalog</button>
+            <button type="button" id="tab-source-url" class="px-2.5 py-0.5 rounded-md text-slate-400 hover:text-white transition-all">Direct URL</button>
+          </div>
+        </div>
+
+        <!-- Catalog Mode -->
+        <div id="ota-catalog-group" class="space-y-3">
+          <!-- Catalog Header / Fetch Button -->
+          <div class="flex items-center justify-between">
+            <span id="ota-catalog-status" class="text-[11px] text-slate-400 truncate max-w-[210px]">
+              Ready to fetch versions
+            </span>
+            <button type="button" id="btn-fetch-catalog" class="px-2.5 py-1 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 text-xs font-semibold flex items-center space-x-1.5 transition-all">
+              <svg id="fetch-spinner" class="w-3.5 h-3.5 hidden animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+              </svg>
+              <svg id="fetch-icon" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <span id="fetch-btn-label">Fetch versions</span>
+            </button>
+          </div>
+
+          <!-- Version Dropdown -->
+          <div class="relative">
+            <select id="select-ota-version" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-blue-500 transition-all font-mono">
+              <option value="latest">⚡ Latest Catalog Release (Auto-detect)</option>
+            </select>
+          </div>
+
+          <!-- Selected Version Details Badge (Dynamic) -->
+          <div id="ota-details-card" class="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3 text-[11px] space-y-2">
+            <div class="flex items-center justify-between text-slate-400 border-b border-slate-800/60 pb-1.5">
+              <span id="detail-target-label" class="font-semibold text-slate-300">Target: OP 15R / GLO</span>
+              <span id="detail-model-label" class="font-mono text-blue-400">Auto-detect</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-slate-300">
+              <div class="flex items-center space-x-1">
+                <span class="text-slate-500">Size:</span>
+                <span id="detail-size-label" class="font-mono">-- GiB</span>
+              </div>
+              <div class="flex items-center space-x-1">
+                <span class="text-slate-500">Patch:</span>
+                <span id="detail-patch-label" class="font-mono">--</span>
+              </div>
+            </div>
+
+            <!-- Matched ODM Status (for Ace 6T GLO/IN) -->
+            <div id="odm-matched-status" class="hidden pt-1.5 border-t border-slate-800/60 text-[10px] flex items-start space-x-1.5">
+              <span id="odm-status-icon">🔍</span>
+              <span id="odm-status-text" class="flex-1 leading-snug">Checking matched Ace 6T ODM...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Custom URL Mode -->
+        <div id="ota-url-group" class="hidden space-y-1.5">
+          <input type="url" id="input-ota-url" placeholder="https://.../target_full_ota.zip" 
+                 class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-blue-500 transition-all font-mono">
+          <p class="text-[11px] text-slate-400">
+            Direct download link to a full OTA.zip file. Incremental updates are not supported.
+          </p>
+        </div>
+      </div>
+
+      <!-- Collapsible Advanced Settings -->
+      <div class="bg-slate-900/90 border border-slate-800/90 rounded-2xl overflow-hidden shadow-xl">
+        <button type="button" id="toggle-advanced" class="w-full px-4 py-3 flex items-center justify-between text-xs font-semibold text-slate-300 uppercase tracking-wider hover:bg-slate-800/50 transition-colors">
+          <span class="flex items-center space-x-2">
+            <span>⚙️ Advanced Options</span>
+          </span>
+          <svg id="advanced-arrow" class="w-4 h-4 text-slate-400 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+
+        <div id="advanced-content" class="hidden p-4 pt-1 border-t border-slate-800/60 space-y-4 text-xs">
+          <!-- Upload To -->
+          <div>
+            <label class="block text-slate-300 font-medium mb-1.5">Upload Destination</label>
+            <div class="grid grid-cols-2 gap-2">
+              <button type="button" data-upload="Gofile" class="upload-btn active-choice py-2 rounded-lg border text-center font-medium transition-all">
+                Gofile (Cloud Link)
+              </button>
+              <button type="button" data-upload="Artifact Only" class="upload-btn inactive-choice py-2 rounded-lg border text-center font-medium transition-all">
+                GitHub Artifact Only
+              </button>
+            </div>
+          </div>
+
+          <!-- Bloat Static ODM -->
+          <div>
+            <label class="block text-slate-300 font-medium mb-1">Ace 6T Bloat ODM Mode</label>
+            <select id="select-bloat" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500">
+              <option value="0" selected>0 • Dynamic patch-matched (Recommended)</option>
+              <option value="1">1 • Static legacy bloat</option>
+            </select>
+          </div>
+
+          <!-- Gofile API Key (optional, visible only when Gofile is selected) -->
+          <div id="gofile-key-group">
+            <label class="block text-slate-300 font-medium mb-1">Custom Gofile API Key (Optional)</label>
+            <input type="password" id="input-gofile-key" placeholder="Defaults to repo secret" 
+                   class="w-full bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-blue-500 font-mono">
+          </div>
+
+          <!-- Notify Telegram Toggle -->
+          <div class="flex items-center justify-between pt-1">
+            <div>
+              <span class="block text-slate-200 font-medium">Telegram Notification</span>
+              <span class="block text-[11px] text-slate-500">Send download link to chat when build finishes</span>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" id="toggle-tg-notify" checked class="sr-only peer">
+              <div class="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Build Summary Card -->
+      <div class="p-3.5 rounded-2xl bg-gradient-to-r from-blue-950/40 via-indigo-950/40 to-slate-900 border border-blue-500/20 text-xs">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-[11px] font-semibold text-blue-400 uppercase tracking-wider">Estimated Package Name</span>
+          <span class="text-[10px] text-slate-400">Target Output</span>
+        </div>
+        <div id="preview-artifact" class="font-mono text-xs text-white font-semibold bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800 break-all">
+          Super Flasher 15R GLO.zip
+        </div>
+      </div>
+
+      <!-- Launch Button (fallback when running outside Telegram) -->
+      <button type="button" id="btn-trigger" class="hidden w-full py-3.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-600/30 active:scale-[0.98] transition-all items-center justify-center space-x-2 text-sm">
+        <svg class="w-5 h-5 text-white animate-spin hidden" id="spinner-icon" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <span id="btn-trigger-text">🚀 Trigger Action Build</span>
+      </button>
+
+    </section>
+
+    <!-- TAB 2: ACTION RUNS -->
+    <section id="tab-runs" class="hidden space-y-3">
+      <div class="flex items-center justify-between mb-1">
+        <div>
+          <h2 class="text-sm font-bold text-white flex items-center space-x-2">
+            <span>Action Runs</span>
+            <span id="live-indicator" class="hidden items-center space-x-1 text-[10px] font-semibold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20">
+              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping"></span>
+              <span>LIVE</span>
+            </span>
+          </h2>
+          <p class="text-[11px] text-slate-400">Workflow: Build Macan</p>
+        </div>
+        <button type="button" id="btn-refresh-runs" class="p-2 rounded-xl bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-300 text-xs flex items-center space-x-1.5 transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          <span>Refresh</span>
+        </button>
+      </div>
+
+      <!-- Runs List Container -->
+      <div id="runs-list" class="space-y-2.5">
+        <div class="p-6 text-center text-xs text-slate-500">
+          Loading workflow runs...
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 max-w-[90vw] px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl text-xs text-white flex items-center space-x-2 transition-all duration-300 opacity-0 pointer-events-none z-50">
+    <span id="toast-icon">ℹ️</span>
+    <span id="toast-message">Notification message</span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

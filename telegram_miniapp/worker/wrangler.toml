@@ -1,0 +1,19 @@
+name = "flasher-builder"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# Automatically serve static assets from ../public (HTML, CSS, JS)
+[assets]
+directory = "../public"
+binding = "ASSETS"
+
+[vars]
+GITHUB_REPO = "bt75gh48/Flasher_Builder"
+GITHUB_BRANCH = "main"
+# Toggle universal build & action runs access ("true" or "false")
+ENABLE_PUBLIC_ACTION_RUNS = "true"
+
+# Secrets to set via `npx wrangler secret put <NAME>`:
+# - GITHUB_PAT
+# - TELEGRAM_BOT_TOKEN
+# - ALLOWED_TELEGRAM_USER_IDS (required for "View GitHub" repo link & admin access, e.g. "1593626807")

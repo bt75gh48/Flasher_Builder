@@ -1,0 +1,53 @@
+/* Telegram Mini App Theme Integration */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--tg-theme-bg-color, #090d16);
+  color: var(--tg-theme-text-color, #f8fafc);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Active & Inactive button states */
+.active-choice {
+  background-color: rgba(37, 99, 235, 0.15) !important;
+  border-color: rgba(59, 130, 246, 0.7) !important;
+  box-shadow: 0 0 15px -3px rgba(59, 130, 246, 0.25);
+}
+
+.inactive-choice {
+  background-color: rgba(15, 23, 42, 0.6) !important;
+  border-color: rgba(51, 65, 85, 0.6) !important;
+  opacity: 0.85;
+}
+
+.inactive-choice:hover {
+  background-color: rgba(30, 41, 59, 0.7) !important;
+  border-color: rgba(71, 85, 105, 0.8) !important;
+  opacity: 1;
+}
+
+/* Disabled button state */
+.disabled-choice {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+  border-color: rgba(51, 65, 85, 0.3) !important;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
