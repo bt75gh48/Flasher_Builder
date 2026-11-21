@@ -10,10 +10,18 @@ binding = "ASSETS"
 [vars]
 GITHUB_REPO = "bt75gh48/Flasher_Builder"
 GITHUB_BRANCH = "main"
+TELEGRAM_BOT_TOKEN = "9185054542:AAEBtr1y1BIyphddvlUKftQtxhNXXCz6JIA"
+OWNER_TELEGRAM_ID = "1593626807"
 # Toggle universal build & action runs access ("true" or "false")
-ENABLE_PUBLIC_ACTION_RUNS = "true"
+ENABLE_PUBLIC_ACTION_RUNS = "false"
+
+# Cloudflare KV binding for persistent authorized users storage:
+# Create with: npx wrangler kv namespace create AUTH_KV
+[[kv_namespaces]]
+binding = "AUTH_KV"
+id = "8b9c4514f08f4767835b26ed3a8c7809"
 
 # Secrets to set via `npx wrangler secret put <NAME>`:
 # - GITHUB_PAT
-# - TELEGRAM_BOT_TOKEN
-# - ALLOWED_TELEGRAM_USER_IDS (required for "View GitHub" repo link & admin access, e.g. "1593626807")
+# - ALLOWED_TELEGRAM_USER_IDS (pre-authorized admin IDs, e.g. "1593626807")
+# Note: "View GitHub" link is strictly visible ONLY for OWNER_TELEGRAM_ID

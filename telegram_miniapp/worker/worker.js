@@ -60,6 +60,14 @@ export default {
       case '/api/cancel-run':
         if (request.method === 'POST') return handleCancelRun(request, env);
         break;
+      case '/api/telegram-webhook':
+        if (request.method === 'POST') return handleTelegramWebhook(request, env);
+        if (request.method === 'GET') return jsonResponse({ status: 'ok', message: 'Telegram Webhook Endpoint' });
+        break;
+      case '/api/set-webhook':
+        return handleSetWebhook(request, env);
+      case '/api/webhook-info':
+        return handleGetWebhookInfo(request, env);
       case '/api/health':
         return jsonResponse({ status: 'ok', time: new Date().toISOString() });
     }
@@ -86,7 +94,10 @@ function isPublicAccessEnabled(env) {
  */
 async function handleAuthStatus(request, env) {
   const auth = await authenticateTelegram(request, env);
-  const whitelistConfigured = Boolean(env.ALLOWED_TELEGRAM_USER_IDS && env.ALLOWED_TELEGRAM_USER_IDS.trim());
+  const whitelistConfigured = Boolean(
+    (env.ALLOWED_TELEGRAM_USER_IDS && env.ALLOWED_TELEGRAM_USER_IDS.trim()) ||
+    (env.OWNER_TELEGRAM_ID && env.OWNER_TELEGRAM_ID.trim())
+  );
   const publicAccess = isPublicAccessEnabled(env);
 
   if (!auth.ok) {
@@ -205,6 +216,56 @@ async function handleTrigger(request, env) {
     return jsonResponse({ error: `GitHub API error (${ghResp.status}): ${errText}` }, ghResp.status);
   }
 
+  // Notify Owner on Telegram regarding the build submission
+  try {
+    const ownerId = getOwnerId(env);
+    const botToken = env.TELEGRAM_BOT_TOKEN;
+    if (ownerId && botToken) {
+      const origin = new URL(request.url).origin;
+      const isOwnerTrigger = isOwner(auth.user?.id, env);
+      const title = isOwnerTrigger
+        ? '🚀 <b>Build Action Dispatched (Owner)</b>'
+        : '🔔 <b>New Build Action Dispatched by User</b>';
+
+      const uFirst = auth.user?.first_name || '';
+      const uLast = auth.user?.last_name || '';
+      const uName = auth.user?.username ? ` (@${escapeHtml(auth.user.username)})` : '';
+      const uId = auth.user?.id || 'Unknown';
+      const userLabel = (uFirst || uLast) ? `${escapeHtml(uFirst)} ${escapeHtml(uLast)}`.trim() : (auth.user?.username ? `@${escapeHtml(auth.user.username)}` : 'User');
+
+      const otaInfo = inputs.ota_url
+        ? `🔗 <b>Custom OTA URL:</b> <code>${escapeHtml(inputs.ota_url)}</code>`
+        : `📦 <b>OTA Version:</b> <code>${escapeHtml(inputs.ota_version || 'latest')}</code>`;
+
+      const odmInfo = inputs.bloat_static_odm === '1' ? 'Enabled' : 'Disabled';
+
+      const notifyMsg =
+        `${title}\n\n` +
+        `👤 <b>Triggered By:</b> ${userLabel}${uName}\n` +
+        `🆔 <b>User ID:</b> <code>${uId}</code>\n` +
+        `📱 <b>Device:</b> <code>${escapeHtml(inputs.device)}</code>\n` +
+        `⚡ <b>Flasher:</b> <code>${escapeHtml(inputs.flasher_type)}</code>\n` +
+        `🌍 <b>Region:</b> <code>${escapeHtml(inputs.region)}</code>\n` +
+        `${otaInfo}\n` +
+        `🧩 <b>Static ODM:</b> ${odmInfo}\n` +
+        `☁️ <b>Destination:</b> ${escapeHtml(inputs.upload_to)}\n` +
+        `⏰ <b>Time:</b> ${new Date().toUTCString()}`;
+
+      await sendTelegramApi(botToken, 'sendMessage', {
+        chat_id: ownerId,
+        text: notifyMsg,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📊 Open Mini App Monitor', web_app: { url: origin } }]
+          ]
+        }
+      }).catch(err => console.error('Failed to send build notification to owner:', err));
+    }
+  } catch (notifyErr) {
+    console.error('Owner notification error:', notifyErr);
+  }
+
   return jsonResponse({
     ok: true,
     message: 'Build workflow triggered successfully',
@@ -262,6 +323,43 @@ async function handleCancelRun(request, env) {
     });
 
     if (ghResp.status === 202) {
+      // Notify owner of build cancellation
+      try {
+        const ownerId = getOwnerId(env);
+        const botToken = env.TELEGRAM_BOT_TOKEN;
+        if (ownerId && botToken) {
+          const origin = new URL(request.url).origin;
+          const isOwnerCancel = isOwner(auth.user?.id, env);
+          const title = isOwnerCancel
+            ? '🛑 <b>Build Run Canceled (Owner)</b>'
+            : '⚠️ <b>Build Run Canceled by User</b>';
+
+          const uFirst = auth.user?.first_name || '';
+          const uLast = auth.user?.last_name || '';
+          const uName = auth.user?.username ? ` (@${escapeHtml(auth.user.username)})` : '';
+          const uId = auth.user?.id || 'Unknown';
+          const userLabel = (uFirst || uLast) ? `${escapeHtml(uFirst)} ${escapeHtml(uLast)}`.trim() : (auth.user?.username ? `@${escapeHtml(auth.user.username)}` : 'User');
+
+          const notifyMsg =
+            `${title}\n\n` +
+            `👤 <b>Canceled By:</b> ${userLabel}${uName}\n` +
+            `🆔 <b>User ID:</b> <code>${uId}</code>\n` +
+            `🔢 <b>Workflow Run:</b> <code>#${escapeHtml(runId)}</code>\n` +
+            `⏰ <b>Time:</b> ${new Date().toUTCString()}`;
+
+          await sendTelegramApi(botToken, 'sendMessage', {
+            chat_id: ownerId,
+            text: notifyMsg,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '📊 Open Mini App Monitor', web_app: { url: origin } }]
+              ]
+            }
+          }).catch(err => console.error('Failed to send cancel notification to owner:', err));
+        }
+      } catch (_) {}
+
       return jsonResponse({
         ok: true,
         message: `Cancellation requested for build run #${runId}.`,
@@ -577,30 +675,147 @@ async function handleGetCatalog(request) {
   }
 }
 
+function getOwnerId(env) {
+  return String(env.OWNER_TELEGRAM_ID || '1593626807').trim();
+}
+
+function isOwner(userId, env) {
+  const uIdStr = String(userId || '').trim();
+  if (!uIdStr) return false;
+  const ownerId = getOwnerId(env);
+  return Boolean(ownerId && uIdStr === ownerId);
+}
+
+function getAdminIds(env) {
+  const owner = getOwnerId(env);
+  const raw = env.ALLOWED_TELEGRAM_USER_IDS || '';
+  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  if (owner && !ids.includes(owner)) {
+    ids.push(owner);
+  }
+  return ids;
+}
+
+function isOwnerOrAdmin(userId, env) {
+  const uIdStr = String(userId || '').trim();
+  if (!uIdStr) return false;
+  const adminIds = getAdminIds(env);
+  return adminIds.includes(uIdStr);
+}
+
+async function isUserAuthorized(userId, env) {
+  const uIdStr = String(userId || '').trim();
+  if (!uIdStr) return false;
+
+  // Pre-configured Admins & Owner are always authorized
+  if (isOwnerOrAdmin(uIdStr, env)) {
+    return true;
+  }
+
+  // Cloudflare KV storage check
+  if (env.AUTH_KV) {
+    try {
+      const record = await env.AUTH_KV.get(`user:${uIdStr}`);
+      return Boolean(record);
+    } catch (err) {
+      console.warn('KV read error:', err);
+    }
+  }
+
+  return false;
+}
+
+async function saveAuthorizedUser(userObj, env, approvedBy = 'admin') {
+  const uIdStr = String(userObj.id || userObj.userId || '').trim();
+  if (!uIdStr) return false;
+
+  if (!env.AUTH_KV) {
+    console.error('AUTH_KV binding is missing in Cloudflare Worker environment');
+    return false;
+  }
+
+  const data = {
+    id: uIdStr,
+    username: userObj.username || '',
+    first_name: userObj.first_name || '',
+    last_name: userObj.last_name || '',
+    approved_by: String(approvedBy),
+    approved_at: new Date().toISOString()
+  };
+
+  try {
+    await env.AUTH_KV.put(`user:${uIdStr}`, JSON.stringify(data));
+    await env.AUTH_KV.delete(`pending:${uIdStr}`).catch(() => {});
+    return true;
+  } catch (err) {
+    console.error('KV write error:', err);
+    return false;
+  }
+}
+
+async function revokeAuthorizedUser(userId, env) {
+  const uIdStr = String(userId || '').trim();
+  if (!uIdStr) return false;
+
+  if (!env.AUTH_KV) {
+    console.error('AUTH_KV binding is missing in Cloudflare Worker environment');
+    return false;
+  }
+
+  try {
+    await env.AUTH_KV.delete(`user:${uIdStr}`);
+    return true;
+  } catch (err) {
+    console.error('KV delete error:', err);
+    return false;
+  }
+}
+
+async function listAllAuthorizedUsers(env) {
+  const list = [];
+  if (!env.AUTH_KV) return list;
+
+  try {
+    const keysRes = await env.AUTH_KV.list({ prefix: 'user:' });
+    if (keysRes && keysRes.keys) {
+      for (const k of keysRes.keys) {
+        const val = await env.AUTH_KV.get(k.name);
+        if (val) {
+          try {
+            list.push(JSON.parse(val));
+          } catch (_) {}
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('KV list error:', err);
+  }
+
+  return list;
+}
+
 /**
  * Determine granular permissions for a Telegram user
  */
-function checkUserPermissions(user, env, devMode = false) {
+async function checkUserPermissions(user, env, devMode = false) {
   const publicAccess = isPublicAccessEnabled(env);
-  const allowedStr = env.ALLOWED_TELEGRAM_USER_IDS || '';
-  const allowed = allowedStr.split(',').map(s => s.trim()).filter(Boolean);
   const userId = String(user?.id || '');
 
   let isWhitelisted = false;
   if (devMode) {
     isWhitelisted = true;
-  } else if (allowed.length > 0 && userId) {
-    isWhitelisted = allowed.includes(userId);
+  } else if (userId) {
+    isWhitelisted = await isUserAuthorized(userId, env);
   }
 
   // Universal Build & Monitoring Access when ENABLE_PUBLIC_ACTION_RUNS is true;
-  // otherwise strictly restricted to ALLOWED_TELEGRAM_USER_IDS.
+  // otherwise strictly restricted to authorized users.
   const canTrigger = isWhitelisted || publicAccess;
   const canViewRuns = isWhitelisted || publicAccess;
   const canCancel = isWhitelisted || publicAccess;
 
-  // Regardless of the environment toggle, "View GitHub" is exclusively for ALLOWED_TELEGRAM_USER_IDS.
-  const canViewGithub = isWhitelisted;
+  // View GitHub link is strictly and ONLY visible for the Owner (OWNER_TELEGRAM_ID)
+  const canViewGithub = devMode ? true : isOwner(userId, env);
 
   return {
     isWhitelisted,
@@ -622,7 +837,7 @@ async function authenticateTelegram(request, env) {
   // Local development fallback if bot token is not configured
   if (!env.TELEGRAM_BOT_TOKEN) {
     const devUser = { id: 999999999, first_name: 'DevAdmin', username: 'devadmin' };
-    const perms = checkUserPermissions(devUser, env, true);
+    const perms = await checkUserPermissions(devUser, env, true);
     return {
       ok: true,
       devMode: true,
@@ -636,7 +851,7 @@ async function authenticateTelegram(request, env) {
     if (publicAccess) {
       // Allow anonymous web visitor when public access is enabled
       const webUser = { id: 'web_visitor', first_name: 'Web Visitor', username: 'guest' };
-      const perms = checkUserPermissions(webUser, env, false);
+      const perms = await checkUserPermissions(webUser, env, false);
       return {
         ok: true,
         user: webUser,
@@ -655,7 +870,7 @@ async function authenticateTelegram(request, env) {
     return { ok: false, error: `Unauthorized: ${verification.reason}` };
   }
 
-  const perms = checkUserPermissions(verification.user, env, false);
+  const perms = await checkUserPermissions(verification.user, env, false);
 
   return {
     ok: true,
@@ -732,6 +947,564 @@ async function verifyTelegramWebAppData(telegramInitData, botToken) {
     return { valid: true, user };
   } catch (err) {
     return { valid: false, reason: err.message };
+  }
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function sendTelegramApi(token, method, payload) {
+  if (!token) return { ok: false, error: 'No Telegram bot token configured' };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return await res.json();
+  } catch (err) {
+    console.error(`Telegram API error (${method}):`, err);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Handle Telegram Bot Webhook Updates
+ */
+async function handleTelegramWebhook(request, env) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    return jsonResponse({ error: 'TELEGRAM_BOT_TOKEN not configured' }, 500);
+  }
+
+  let update;
+  try {
+    update = await request.json();
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const origin = new URL(request.url).origin;
+
+  try {
+    if (update.message) {
+      await handleWebhookMessage(update.message, env, token, origin);
+    } else if (update.callback_query) {
+      await handleWebhookCallbackQuery(update.callback_query, env, token, origin);
+    }
+  } catch (err) {
+    console.error('Webhook processing error:', err);
+  }
+
+  return jsonResponse({ ok: true });
+}
+
+/**
+ * Handle Incoming Telegram Messages (/start, /whitelist, /auth, /revoke)
+ */
+async function handleWebhookMessage(message, env, token, origin) {
+  const chatId = message.chat?.id;
+  const from = message.from;
+  const text = (message.text || '').trim();
+  if (!chatId || !from) return;
+
+  const userId = String(from.id);
+
+  // Command: /start
+  if (text.startsWith('/start')) {
+    const isAuthorized = await isUserAuthorized(userId, env);
+
+    if (isAuthorized) {
+      const welcomeText = 
+        `⚡ <b>Flasher Builder-Macan</b>\n\n` +
+        `Welcome back, <b>${escapeHtml(from.first_name || from.username || 'User')}</b>!\n` +
+        `Your account is authorized and ready to build.\n\n` +
+        `🆔 <b>Telegram ID:</b> <code>${userId}</code>\n` +
+        `✅ <b>Status:</b> Authorized\n\n` +
+        `Tap below to launch the Flasher Builder Mini App:`;
+
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: welcomeText,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚀 Launch Flasher Builder', web_app: { url: origin } }],
+            [{ text: '🔄 Check Status', callback_data: `check_status:${userId}` }]
+          ]
+        }
+      });
+    } else {
+      const unauthText = 
+        `🔒 <b>Authorization Required</b>\n\n` +
+        `Welcome to <b>Flasher Builder Macan</b>.\n` +
+        `This bot requires administrator authorization before you can trigger builds.\n\n` +
+        `👤 <b>Name:</b> ${escapeHtml(from.first_name || 'User')}${from.username ? ` (@${escapeHtml(from.username)})` : ''}\n` +
+        `🆔 <b>Your Telegram ID:</b> <code>${userId}</code>\n` +
+        `⚠️ <b>Status:</b> Not Authorized\n\n` +
+        `Tap <b>Request Authorization</b> below to send an access request to the administrator.`;
+
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: unauthText,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📩 Request Authorization', callback_data: `req_auth:${userId}` }],
+            [{ text: '🔄 Check Status', callback_data: `check_status:${userId}` }]
+          ]
+        }
+      });
+    }
+    return;
+  }
+
+  // Admin Commands (Only Owner / Admin)
+  if (isOwnerOrAdmin(userId, env)) {
+    if (text === '/whitelist') {
+      await sendAdminWhitelist(chatId, env, token);
+      return;
+    }
+
+    if (text.startsWith('/auth ')) {
+      const targetId = text.replace('/auth', '').trim();
+      if (!/^\d+$/.test(targetId)) {
+        await sendTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ Invalid user ID. Usage: <code>/auth &lt;TELEGRAM_USER_ID&gt;</code>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      await saveAuthorizedUser({ id: targetId, first_name: 'Manual Auth', username: '' }, env, userId);
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>User Authorized</b>\nID: <code>${targetId}</code> has been approved.`,
+        parse_mode: 'HTML'
+      });
+
+      // Try notifying the user
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: targetId,
+        text: `🎉 <b>Access Granted!</b>\nAn administrator has authorized your account.\nYou can now launch Flasher Builder:`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚀 Launch Flasher Builder', web_app: { url: origin } }]
+          ]
+        }
+      }).catch(() => {});
+      return;
+    }
+
+    if (text.startsWith('/revoke ')) {
+      const targetId = text.replace('/revoke', '').trim();
+      if (!/^\d+$/.test(targetId)) {
+        await sendTelegramApi(token, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ Invalid user ID. Usage: <code>/revoke &lt;TELEGRAM_USER_ID&gt;</code>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      await revokeAuthorizedUser(targetId, env);
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: `🗑 <b>User Revoked</b>\nID: <code>${targetId}</code> authorization has been removed.`,
+        parse_mode: 'HTML'
+      });
+
+      // Try notifying the user
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: targetId,
+        text: `⚠️ <b>Authorization Revoked</b>\nYour access to Flasher Builder has been revoked by an administrator.`,
+        parse_mode: 'HTML'
+      }).catch(() => {});
+      return;
+    }
+
+    if (text === '/help') {
+      const helpText = 
+        `🛠 <b>Admin Commands:</b>\n\n` +
+        `• <code>/whitelist</code> - View all authorized users & admins\n` +
+        `• <code>/auth &lt;id&gt;</code> - Manually authorize a user ID\n` +
+        `• <code>/revoke &lt;id&gt;</code> - Revoke a user ID\n` +
+        `• <code>/start</code> - Check bot status & open Mini App`;
+
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: helpText,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+  } else {
+    // Non-admin feedback for any unrecognized slash command
+    if (text.startsWith('/')) {
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: chatId,
+        text: `ℹ️ Send /start to check your authorization status or open the Mini App.`,
+        parse_mode: 'HTML'
+      });
+    }
+  }
+}
+
+/**
+ * Handle Telegram Callback Queries (Request Auth, Approve, Reject, Check Status)
+ */
+async function handleWebhookCallbackQuery(callbackQuery, env, token, origin) {
+  const queryId = callbackQuery.id;
+  const from = callbackQuery.from;
+  const data = callbackQuery.data || '';
+  const message = callbackQuery.message;
+  const chatId = message?.chat?.id;
+  const messageId = message?.message_id;
+
+  const senderId = String(from.id);
+
+  // 1. User taps "Request Authorization"
+  if (data.startsWith('req_auth:')) {
+    const targetUserId = data.split(':')[1];
+    const isAlreadyAuth = await isUserAuthorized(targetUserId, env);
+
+    if (isAlreadyAuth) {
+      await sendTelegramApi(token, 'answerCallbackQuery', {
+        callback_query_id: queryId,
+        text: '✅ You are already authorized!'
+      });
+      if (chatId && messageId) {
+        await sendTelegramApi(token, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: `🎉 <b>You are Authorized!</b>\n\nYou can launch Flasher Builder right now:`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🚀 Launch Flasher Builder', web_app: { url: origin } }]
+            ]
+          }
+        });
+      }
+      return;
+    }
+
+    // Save pending info to KV or memory so owner has details
+    const pendingData = {
+      id: targetUserId,
+      first_name: from.first_name || '',
+      last_name: from.last_name || '',
+      username: from.username || '',
+      requested_at: new Date().toISOString()
+    };
+    if (env.AUTH_KV) {
+      try {
+        await env.AUTH_KV.put(`pending:${targetUserId}`, JSON.stringify(pendingData));
+      } catch (err) {
+        console.warn('KV pending save error:', err);
+      }
+    }
+
+    // Forward request to Owner / Admins
+    const userDisplay = `${escapeHtml(from.first_name || '')} ${escapeHtml(from.last_name || '')}`.trim();
+    const usernameTag = from.username ? ` (@${escapeHtml(from.username)})` : '';
+    const nowStr = new Date().toUTCString();
+
+    const ownerNotice = 
+      `🔔 <b>Authorization Request</b>\n\n` +
+      `A user is requesting access to Flasher Builder:\n\n` +
+      `👤 <b>User:</b> ${userDisplay || 'Unknown'}${usernameTag}\n` +
+      `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
+      `⏰ <b>Requested:</b> ${nowStr}\n\n` +
+      `Choose an action:`;
+
+    const adminKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '✅ Authorize', callback_data: `auth_appr:${targetUserId}` },
+          { text: '❌ Reject', callback_data: `auth_rejc:${targetUserId}` }
+        ]
+      ]
+    };
+
+    const adminIds = getAdminIds(env);
+    for (const aId of adminIds) {
+      await sendTelegramApi(token, 'sendMessage', {
+        chat_id: aId,
+        text: ownerNotice,
+        parse_mode: 'HTML',
+        reply_markup: adminKeyboard
+      }).catch(err => console.error(`Failed sending request to admin ${aId}:`, err));
+    }
+
+    // Acknowledge callback
+    await sendTelegramApi(token, 'answerCallbackQuery', {
+      callback_query_id: queryId,
+      text: '📨 Request forwarded to owner!'
+    });
+
+    // Update user's message
+    if (chatId && messageId) {
+      await sendTelegramApi(token, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: 
+          `⏳ <b>Authorization Request Sent</b>\n\n` +
+          `Your access request has been sent to the administrator.\n` +
+          `🆔 <b>Your ID:</b> <code>${targetUserId}</code>\n\n` +
+          `You will receive a notification as soon as it is approved.`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔄 Check Status', callback_data: `check_status:${targetUserId}` }]
+          ]
+        }
+      });
+    }
+    return;
+  }
+
+  // 2. Owner taps "Authorize"
+  if (data.startsWith('auth_appr:')) {
+    if (!isOwnerOrAdmin(senderId, env)) {
+      await sendTelegramApi(token, 'answerCallbackQuery', {
+        callback_query_id: queryId,
+        text: '❌ Access Denied: Only administrators can approve requests.',
+        show_alert: true
+      });
+      return;
+    }
+
+    const targetUserId = data.split(':')[1];
+
+    let userDetails = { id: targetUserId };
+    if (env.AUTH_KV) {
+      try {
+        const raw = await env.AUTH_KV.get(`pending:${targetUserId}`);
+        if (raw) userDetails = JSON.parse(raw);
+      } catch (err) {
+        console.warn('KV pending get error:', err);
+      }
+    }
+
+    await saveAuthorizedUser(userDetails, env, senderId);
+
+    await sendTelegramApi(token, 'answerCallbackQuery', {
+      callback_query_id: queryId,
+      text: `✅ User ${targetUserId} approved!`
+    });
+
+    // Update admin's message
+    if (chatId && messageId) {
+      const uDisplay = userDetails.first_name ? `${escapeHtml(userDetails.first_name)} ` : '';
+      const uName = userDetails.username ? `(@${escapeHtml(userDetails.username)}) ` : '';
+      await sendTelegramApi(token, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: 
+          `✅ <b>User Authorized!</b>\n\n` +
+          `👤 <b>User:</b> ${uDisplay}${uName}\n` +
+          `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
+          `👑 <b>Approved By:</b> ${escapeHtml(from.first_name || 'Admin')} (<code>${senderId}</code>)\n` +
+          `⏰ <b>Date:</b> ${new Date().toUTCString()}`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🗑 Revoke Access', callback_data: `auth_rejc:${targetUserId}` }]
+          ]
+        }
+      });
+    }
+
+    // Notify the user directly
+    await sendTelegramApi(token, 'sendMessage', {
+      chat_id: targetUserId,
+      text: 
+        `🎉 <b>Access Granted!</b>\n\n` +
+        `Your authorization request has been approved by the administrator.\n` +
+        `You can now launch Flasher Builder and start builds!`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🚀 Launch Flasher Builder', web_app: { url: origin } }]
+        ]
+      }
+    }).catch(err => console.warn(`Could not notify approved user ${targetUserId}:`, err));
+
+    return;
+  }
+
+  // 3. Owner taps "Reject" or "Revoke"
+  if (data.startsWith('auth_rejc:')) {
+    if (!isOwnerOrAdmin(senderId, env)) {
+      await sendTelegramApi(token, 'answerCallbackQuery', {
+        callback_query_id: queryId,
+        text: '❌ Access Denied: Only administrators can reject/revoke.',
+        show_alert: true
+      });
+      return;
+    }
+
+    const targetUserId = data.split(':')[1];
+    await revokeAuthorizedUser(targetUserId, env);
+
+    await sendTelegramApi(token, 'answerCallbackQuery', {
+      callback_query_id: queryId,
+      text: `User ${targetUserId} rejected/revoked.`
+    });
+
+    if (chatId && messageId) {
+      await sendTelegramApi(token, 'editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: 
+          `❌ <b>Authorization Rejected / Revoked</b>\n\n` +
+          `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
+          `👮 <b>Action By:</b> ${escapeHtml(from.first_name || 'Admin')} (<code>${senderId}</code>)\n` +
+          `⏰ <b>Date:</b> ${new Date().toUTCString()}`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Re-Authorize', callback_data: `auth_appr:${targetUserId}` }]
+          ]
+        }
+      });
+    }
+
+    // Notify user
+    await sendTelegramApi(token, 'sendMessage', {
+      chat_id: targetUserId,
+      text: `❌ <b>Access Denied</b>\n\nYour authorization request was rejected or revoked by the administrator.`,
+      parse_mode: 'HTML'
+    }).catch(() => {});
+
+    return;
+  }
+
+  // 4. User taps "Check Status"
+  if (data.startsWith('check_status:')) {
+    const targetUserId = data.split(':')[1];
+    const isAuthorized = await isUserAuthorized(targetUserId, env);
+
+    if (isAuthorized) {
+      await sendTelegramApi(token, 'answerCallbackQuery', {
+        callback_query_id: queryId,
+        text: '✅ You are authorized!'
+      });
+
+      if (chatId && messageId) {
+        await sendTelegramApi(token, 'editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: 
+            `⚡ <b>Access Approved!</b>\n\n` +
+            `Your account (ID: <code>${targetUserId}</code>) is authorized.\n` +
+            `Tap the button below to launch the Mini App:`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🚀 Launch Flasher Builder', web_app: { url: origin } }]
+            ]
+          }
+        });
+      }
+    } else {
+      await sendTelegramApi(token, 'answerCallbackQuery', {
+        callback_query_id: queryId,
+        text: '⏳ Still pending or not authorized.',
+        show_alert: true
+      });
+    }
+    return;
+  }
+}
+
+/**
+ * Send Whitelist & Admin Overview to Administrator
+ */
+async function sendAdminWhitelist(chatId, env, token) {
+  const adminIds = getAdminIds(env);
+  const authorizedUsers = await listAllAuthorizedUsers(env);
+
+  let text = `📋 <b>Authorized Users & Admins</b>\n\n`;
+  text += `👑 <b>Administrators:</b>\n`;
+  for (const aId of adminIds) {
+    text += ` • <code>${aId}</code>\n`;
+  }
+
+  text += `\n👥 <b>Approved Users (${authorizedUsers.length}):</b>\n`;
+  if (authorizedUsers.length === 0) {
+    text += ` <i>No additional users authorized yet.</i>\n`;
+  } else {
+    for (const u of authorizedUsers) {
+      const uName = u.username ? ` (@${escapeHtml(u.username)})` : '';
+      const fName = u.first_name ? `${escapeHtml(u.first_name)} ` : '';
+      text += ` • <code>${u.id}</code> - ${fName}${uName}(by ${u.approved_by || 'admin'})\n`;
+    }
+  }
+
+  text += `\n<i>Commands: /auth &lt;id&gt; | /revoke &lt;id&gt;</i>`;
+
+  await sendTelegramApi(token, 'sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML'
+  });
+}
+
+/**
+ * Webhook Management Helpers
+ */
+async function handleSetWebhook(request, env) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    return jsonResponse({ error: 'TELEGRAM_BOT_TOKEN secret is missing' }, 500);
+  }
+
+  const origin = new URL(request.url).origin;
+  const webhookUrl = `${origin}/api/telegram-webhook`;
+
+  const telegramEndpoint = `https://api.telegram.org/bot${token}/setWebhook`;
+  try {
+    const resp = await fetch(telegramEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: webhookUrl,
+        drop_pending_updates: true,
+        allowed_updates: ['message', 'callback_query']
+      })
+    });
+
+    const result = await resp.json();
+    return jsonResponse({
+      registered_url: webhookUrl,
+      telegram_response: result
+    });
+  } catch (err) {
+    return jsonResponse({ error: `Failed to set webhook: ${err.message}` }, 500);
+  }
+}
+
+async function handleGetWebhookInfo(request, env) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    return jsonResponse({ error: 'TELEGRAM_BOT_TOKEN secret is missing' }, 500);
+  }
+
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/getWebhookInfo`);
+    const data = await resp.json();
+    return jsonResponse(data);
+  } catch (err) {
+    return jsonResponse({ error: err.message }, 500);
   }
 }
 

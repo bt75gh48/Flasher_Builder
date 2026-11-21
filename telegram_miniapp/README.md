@@ -57,9 +57,9 @@ telegram_miniapp/
 
 ---
 
-### Step 3: Deploy to Cloudflare Workers (Free)
+### Step 3: Deploy to Cloudflare Workers (Serverless)
 
-Cloudflare Workers can host both the frontend UI and the backend API on a single global URL for free.
+Cloudflare Workers can host the frontend UI, the backend API, and the entire **Telegram Bot Webhook & Authorization System** 100% serverless without needing any external server or Python process.
 
 1. Install Wrangler CLI (if not already installed):
    ```bash
@@ -73,11 +73,21 @@ Cloudflare Workers can host both the frontend UI and the backend API on a single
    ```bash
    cd telegram_miniapp/worker
    ```
-4. Deploy the worker and assets:
+4. **(Recommended)** Create a Cloudflare KV namespace for permanent authorized user storage:
+   ```bash
+   npx wrangler kv namespace create AUTH_KV
+   ```
+   Copy the output `id = "xxxxxx"` and uncomment it in `telegram_miniapp/worker/wrangler.toml`:
+   ```toml
+   [[kv_namespaces]]
+   binding = "AUTH_KV"
+   id = "your_auth_kv_namespace_id_here"
+   ```
+5. Deploy the worker and static frontend:
    ```bash
    npx wrangler deploy
    ```
-5. Set your secrets and configuration in Cloudflare:
+6. Set your secrets in Cloudflare:
    ```bash
    # Add your GitHub PAT
    npx wrangler secret put GITHUB_PAT
@@ -85,16 +95,23 @@ Cloudflare Workers can host both the frontend UI and the backend API on a single
    # Add your Telegram Bot Token
    npx wrangler secret put TELEGRAM_BOT_TOKEN
 
-   # Whitelist admin user IDs (comma-separated, e.g. "1593626807")
+   # (Optional) Pre-authorize additional admin Telegram IDs (comma-separated, e.g. "1593626807")
    npx wrangler secret put ALLOWED_TELEGRAM_USER_IDS
    ```
 
-   > **Security & Access Control Model:**
-   > - **`ENABLE_PUBLIC_ACTION_RUNS="true"`** (Configured in `wrangler.toml` under `[vars]`): Allows all users (both via Telegram Mini App and direct web browser visits on the Cloudflare Worker URL) to trigger workflow builds and monitor the "Action Runs" tab. Set to `"false"` to restrict both triggering and monitoring exclusively to whitelisted Telegram users in `ALLOWED_TELEGRAM_USER_IDS`.
-   > - **Direct Worker Link (Web Browser):** When public access is enabled, anyone opening the worker URL directly in a browser can build and track progress as a web visitor. The **"View GitHub"** button remains strictly hidden since web visitors have no Telegram identity in `ALLOWED_TELEGRAM_USER_IDS`.
-   > - **Repository Privacy:** Regardless of whether public builds/monitoring are enabled or whether accessed via Telegram or direct web link, the **"View GitHub"** button and repository URL are strictly rendered and exposed **only** to users whose Telegram ID is in `ALLOWED_TELEGRAM_USER_IDS`.
-
-6. Note down the deployed URL (e.g. `https://flasher-builder-miniapp.yourname.workers.dev`).
+7. **Activate Serverless Telegram Webhook (One-click):**
+   Once deployed, simply visit this URL in your web browser (or run `curl`):
+   ```text
+   https://<your-worker-subdomain>.workers.dev/api/set-webhook
+   ```
+   Telegram will reply:
+   ```json
+   {
+     "registered_url": "https://<your-worker>.workers.dev/api/telegram-webhook",
+     "telegram_response": { "ok": true, "result": true, "description": "Webhook was set" }
+   }
+   ```
+   Your Telegram bot is now completely live and managed serverless by your Cloudflare Worker!
 
 ---
 
@@ -104,21 +121,59 @@ You can attach the Mini App to your bot's **Menu Button** so users can open it w
 
 1. In [@BotFather](https://t.me/botfather), send `/setmenubutton`.
 2. Select your bot.
-3. Send the deployed URL (e.g., `https://flasher-builder-miniapp.yourname.workers.dev`).
+3. Send the deployed URL (e.g., `https://flasher-builder.yourname.workers.dev`).
 4. Set the button title to: `⚡ Build Flasher`.
 
-*(Alternatively, run `/newapp` in @BotFather to create a short link like `t.me/your_bot/builder`).*
+*(Alternatively, run `/newapp` in @BotFather to create a direct short link like `t.me/your_bot/builder`).*
 
 ---
 
-### Step 5: (Optional) Run the Bot Launcher
+### Step 5: Telegram User Verification & Authorization Flow
 
-If you want the bot to also respond to `/start` in private chat with an inline launch button:
+The authorization system runs completely serverless inside the Cloudflare Worker:
+
+#### 🛡️ User Verification Flow:
+1. **Unauthorized User starts bot (`/start`):**
+   The bot checks if the user is authorized. If not, it displays:
+   - User's Telegram Name & User ID (e.g. `🆔 Your Telegram ID: 123456789`).
+   - `⚠️ Status: Not Authorized`.
+   - An inline button: **`[ 📩 Request Authorization ]`**.
+2. **User taps `Request Authorization`:**
+   - The bot forwards an authorization prompt directly to the Owner (`OWNER_TELEGRAM_ID = "1593626807"`):
+     ```text
+     🔔 Authorization Request
+     👤 User: John Doe (@johndoe)
+     🆔 User ID: 123456789
+     [ ✅ Authorize ]   [ ❌ Reject ]
+     ```
+   - The user is notified: `⏳ Your authorization request has been sent to the administrator.`
+3. **Owner approves or rejects:**
+   - **Tapping `[ ✅ Authorize ]`:**
+     - The user is stored in Cloudflare KV (`AUTH_KV`).
+     - The owner's message updates to show approval details.
+     - The user immediately receives a notification on Telegram:
+       `🎉 Access Granted! You can now launch Flasher Builder.`
+       with the **`[ 🚀 Launch Flasher Builder ]`** WebApp button.
+   - **Tapping `[ ❌ Reject ]`:**
+     - The user's request is declined and they are notified.
+
+#### 👑 Owner / Admin Commands (Directly in Telegram):
+* `/whitelist` — View all administrators and KV-authorized users.
+* `/auth <user_id>` — Manually authorize a user ID.
+* `/revoke <user_id>` — Revoke authorization for a user ID.
+* `/help` — Show available admin commands.
+
+---
+
+### Step 6: (Alternative) Standalone Python Bot Launcher
+
+If you prefer to run a local polling bot instead of the serverless Cloudflare Webhook:
 
 ```bash
 cd telegram_miniapp/bot
 export TELEGRAM_BOT_TOKEN="your_bot_token"
-export WEBAPP_URL="https://flasher-builder-miniapp.yourname.workers.dev"
+export WEBAPP_URL="https://flasher-builder.yourname.workers.dev"
+export OWNER_TELEGRAM_ID="1593626807"
 python bot.py
 ```
 
